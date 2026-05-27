@@ -41,5 +41,26 @@
     "color": "#76b900",
     "maxValue": 100,
     "suffix": "%"
+  },
+  {
+    "label": "SSH Sessions",
+    "command": "ss -tn src :22 | grep -c ESTAB",
+    "type": "text",
+    "color": "#00ff00",
+    "suffix": ""
+  },
+  {
+    "label": "I/O Wait",
+    "command": "iostat -c 1 1 | awk 'NR==4{print $4}'",
+    "type": "text",
+    "color": "#fdcb6e",
+    "suffix": "%"
+  },
+  {
+    "label": "Failed Units",
+    "command": "systemctl --failed --no-legend | wc -l",
+    "type": "text",
+    "color": "#ff7675",
+    "suffix": ""
   }
 ]
