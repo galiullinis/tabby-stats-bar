@@ -57,7 +57,15 @@ export const TRANSLATIONS = {
         'Refresh Interval': '刷新间隔',
         'How often stats are fetched (seconds). Only the active tab is polled. Minimum 1s.': '获取统计数据的频率（秒）。仅轮询当前活动标签页。最小 1 秒。',
         'seconds': '秒',
-        'This preset will run the following shell command on your servers on every refresh:': '此预设会在每次刷新时在你的服务器上运行以下 Shell 命令：',
+        'This preset will run the following shell command on the active session (local or remote SSH host) on every refresh:': '此预设会在每次刷新时在当前会话（本地或远程 SSH 主机）上运行以下 Shell 命令：',
         'Add this metric?': '要添加此指标吗？',
+        'Built-in Presets': '内置预设',
+        'Ready-made metrics bundled with the plugin. Review each command before adding it.': '随插件提供的现成指标。添加前请检查每条命令。',
+        'Custom metrics and presets are shell commands. They are executed on every refresh on the active session — on your local machine or on the remote SSH host. Only add commands you fully trust.': '自定义指标和预设都是 Shell 命令。它们会在每次刷新时于当前会话（本地或远程 SSH 主机）上执行。请仅添加你完全信任的命令。',
+        'System': '系统',
+        'Network': '网络',
+        'GPU': 'GPU',
+        'Containers': '容器',
+        'Other': '其他',
     }
 };

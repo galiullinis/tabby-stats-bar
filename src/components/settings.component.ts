@@ -1,9 +1,8 @@
 import { Component, Injectable } from '@angular/core'
-import { ConfigService, PlatformService, TranslateService } from 'tabby-core'
+import { ConfigService, TranslateService } from 'tabby-core'
 import { SettingsTabProvider } from 'tabby-settings'
 import { CustomMetric } from '../config'
-
-const PRESETS_URL = 'https://raw.githubusercontent.com/kasuganosoras/tabby-server-stats/main/presets.json';
+import { groupedBuiltinPresets } from '../builtin-presets'
 
 @Component({
     template: `
@@ -76,44 +75,42 @@ const PRESETS_URL = 'https://raw.githubusercontent.com/kasuganosoras/tabby-serve
 
         <div class="separator"></div>
 
-        <!-- 预设库区域 -->
-        <div class="mt-4 mb-3">
-            <div class="d-flex justify-content-between align-items-center mb-2">
-                <h4 class="mb-0" translate>Preset Library</h4>
-                <button class="btn btn-info btn-sm text-white" (click)="fetchPresets()" [disabled]="loadingPresets">
-                    <i class="fas fa-cloud-download-alt me-1"></i>
-                    <span *ngIf="!loadingPresets" translate>Fetch from GitHub</span>
-                    <span *ngIf="loadingPresets" translate>Loading...</span>
-                </button>
+        <!-- 安全警告 -->
+        <div class="alert alert-warning d-flex align-items-start" role="alert">
+            <i class="fas fa-exclamation-triangle me-2 mt-1"></i>
+            <div translate>
+                Custom metrics and presets are shell commands. They are executed on every refresh on the active session — on your local machine or on the remote SSH host. Only add commands you fully trust.
             </div>
+        </div>
+
+        <!-- 内置预设区域（仅随插件一起提供，不从网络加载） -->
+        <div class="mt-4 mb-3">
+            <h4 class="mb-0" translate>Built-in Presets</h4>
             <div class="text-muted" style="font-size: 13px;" translate>
-                Import commonly used metrics from the community
+                Ready-made metrics bundled with the plugin. Review each command before adding it.
             </div>
 
-            <!-- 预设列表 -->
+            <!-- 预设列表（按分类分组，便于扩展） -->
             <div style="overflow-x: auto; width: 100%;">
-                <div class="list-group mt-3 mb-2" *ngIf="presets.length > 0" style="min-width: 450px">
-                    <div class="list-group-item d-flex align-items-center justify-content-between" *ngFor="let p of presets">
-                        <div class="d-flex align-items-center" style="width: 90%">
-                            <span class="badge me-3" [style.background-color]="p.color || '#666'">
-                                {{ (p.type === 'progress' ? 'Progress Bar' : 'Text Value') | translate }}
-                            </span>
-                            <div>
-                                <strong>{{ p.label }}</strong>
-                                <div class="text-muted" style="font-size: 12px; font-family: monospace;">{{ p.command }}</div>
+                <ng-container *ngFor="let group of presetGroups">
+                    <div class="preset-category-title text-muted mt-3 mb-1">{{ group.category | translate }}</div>
+                    <div class="list-group mb-2" style="min-width: 450px">
+                        <div class="list-group-item d-flex align-items-center justify-content-between" *ngFor="let p of group.presets">
+                            <div class="d-flex align-items-center" style="width: 90%">
+                                <span class="badge me-3" [style.background-color]="p.color || '#666'">
+                                    {{ (p.type === 'progress' ? 'Progress Bar' : 'Text Value') | translate }}
+                                </span>
+                                <div>
+                                    <strong>{{ p.label }}</strong>
+                                    <div class="text-muted" style="font-size: 12px; font-family: monospace;">{{ p.command }}</div>
+                                </div>
                             </div>
+                            <button class="btn btn-sm btn-success text-white white-space-nowrap add-preset-btn" (click)="addPreset(p)" title="{{ 'Add to my metrics' | translate }}">
+                                <i class="fas fa-plus"></i> <span translate>Add</span>
+                            </button>
                         </div>
-                        <button class="btn btn-sm btn-success text-white white-space-nowrap add-preset-btn" (click)="addPreset(p)" title="{{ 'Add to my metrics' | translate }}">
-                            <i class="fas fa-plus"></i> <span translate>Add</span>
-                        </button>
                     </div>
-                </div>
-                <div class="text-muted" style="font-size: 13px;" translate>
-                    <a class="submit-own-preset-btn" href="javascript:void(0);" (click)="openGitHubLink()">{{ 'I want to submit my own preset' | translate }} <i class="fas fa-external-link-alt"></i></a>
-                </div>
-            </div>
-            <div class="alert alert-warning mt-2" *ngIf="fetchError">
-                {{ 'Failed to load presets' | translate }}
+                </ng-container>
             </div>
         </div>
 
@@ -216,8 +213,7 @@ const PRESETS_URL = 'https://raw.githubusercontent.com/kasuganosoras/tabby-serve
         .separator { height: 1px; background: rgba(0,0,0,0.1); margin: 20px 0; }
         .white-space-nowrap { white-space: nowrap; }
         .add-preset-btn { width: 12%; justify-content: center; }
-        .submit-own-preset-btn { color: #00ffc8ff; text-decoration: none; }
-        .submit-own-preset-btn:hover { color: #00daaaff; text-decoration: underline; }
+        .preset-category-title { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
         .custom-metric-item { border: 1px solid rgba(100, 100, 100, 0.1); cursor: move; }
         :host-context(.theme-dark) .separator { background: rgba(255,255,255,0.1); }
     `]
@@ -233,14 +229,12 @@ export class ServerStatsSettingsComponent {
     editingIndex = -1;
     draggedIndex: number | null = null;
     isDragging = false;
-    
-    // 预设相关
-    presets: Partial<CustomMetric>[] = [];
-    loadingPresets = false;
-    fetchError = false;
+
+    // Built-in presets bundled with the plugin, grouped by category. No
+    // remote/community loading — extend them in src/builtin-presets.ts.
+    presetGroups = groupedBuiltinPresets();
 
     constructor(
-        private platform: PlatformService,
         private translate: TranslateService,
         public config: ConfigService) {}
 
@@ -256,40 +250,14 @@ export class ServerStatsSettingsComponent {
         this.save();
     }
 
-    async fetchPresets() {
-        this.loadingPresets = true;
-        this.fetchError = false;
-        this.presets = [];
-
-        // Abort the request if it hangs, so the settings UI never gets stuck.
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 10000);
-        try {
-            const response = await fetch(PRESETS_URL, { signal: controller.signal });
-            if (!response.ok) throw new Error('Network response was not ok');
-
-            const data = await response.json();
-            if (Array.isArray(data)) {
-                this.presets = data;
-            } else {
-                throw new Error('Invalid format');
-            }
-        } catch (e) {
-            console.error('Failed to fetch presets:', e);
-            this.fetchError = true;
-        } finally {
-            clearTimeout(timer);
-            this.loadingPresets = false;
-        }
-    }
-
     addPreset(preset: Partial<CustomMetric>) {
-        // SECURITY: presets are downloaded from a remote URL and their `command`
-        // is executed on every server you connect to, every poll cycle. Make the
-        // user explicitly confirm the exact command before adding it.
+        // SECURITY: a preset's `command` is executed on every refresh on the active
+        // session (locally or on the remote SSH host). Even though presets are now
+        // bundled (no remote loading), still require explicit confirmation showing
+        // the exact command.
         const cmd = preset.command || '';
         const warning = this.translate.instant(
-            'This preset will run the following shell command on your servers on every refresh:'
+            'This preset will run the following shell command on the active session (local or remote SSH host) on every refresh:'
         );
         const confirmRun = this.translate.instant('Add this metric?');
         if (!confirm(`${warning}\n\n${cmd}\n\n${confirmRun}`)) {
@@ -412,10 +380,6 @@ export class ServerStatsSettingsComponent {
     setOpacity(val: number) {
         const currentHex = this.hexColor;
         this.updateColor(currentHex, val);
-    }
-
-    openGitHubLink() {
-        this.platform.openExternal('https://github.com/kasuganosoras/tabby-server-stats');
     }
 
     private updateColor(hex: string, opacity: number) {
