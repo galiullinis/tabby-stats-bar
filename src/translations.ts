@@ -73,5 +73,9 @@ export const TRANSLATIONS = {
         'Sparkline Bars': '迷你图列数',
         'Number of CPU history bars shown (20–60).': '显示的 CPU 历史列数（20–60）。',
         'bars': '列',
+        'RAM Display': '内存显示',
+        'Percentage (as now) or numeric used / total, e.g. 3.2G/8G.': '百分比（当前方式）或数值“已用 / 总量”，例如 3.2G/8G。',
+        'Percentage': '百分比',
+        'Used / Total': '已用 / 总量',
     }
 };

@@ -95,6 +95,26 @@ import { clampSparklineBars } from '../services/sparkline'
             </div>
         </div>
 
+        <!-- RAM 显示样式 -->
+        <div class="form-line">
+            <div class="header">
+                <div class="title" translate>RAM Display</div>
+                <div class="description" translate>Percentage (as now) or numeric used / total, e.g. 3.2G/8G.</div>
+            </div>
+            <div class="btn-group">
+                <input type="radio" class="btn-check" name="ramStyle" id="ramStyleBar"
+                    autocomplete="off" value="bar"
+                    [(ngModel)]="config.store.plugin.serverStats.ramStyle"
+                    (ngModelChange)="save()">
+                <label class="btn btn-secondary" for="ramStyleBar" translate>Percentage</label>
+                <input type="radio" class="btn-check" name="ramStyle" id="ramStyleText"
+                    autocomplete="off" value="text"
+                    [(ngModel)]="config.store.plugin.serverStats.ramStyle"
+                    (ngModelChange)="save()">
+                <label class="btn btn-secondary" for="ramStyleText" translate>Used / Total</label>
+            </div>
+        </div>
+
         <!-- 调试日志开关 -->
         <div class="form-line">
             <div class="header">

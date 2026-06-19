@@ -3,7 +3,7 @@ import { Subscription } from 'rxjs'
 import { AppService, ConfigService } from 'tabby-core'
 import { StatsService } from '../services/stats.service'
 import { CustomMetric } from '../config'
-import { formatSpeed } from '../services/stats-parser'
+import { formatSpeed, formatBytes } from '../services/stats-parser'
 import { clampPollIntervalMs } from '../services/poll-timing'
 import { pushSample, clampSparklineBars, cpuColor } from '../services/sparkline'
 
@@ -40,10 +40,15 @@ import { pushSample, clampSparklineBars, cpuColor } from '../services/sparkline'
                 <div class="stat-section">
                     <div class="stat-label">{{ 'RAM' | translate }}</div>
                     <div class="stat-content">
-                        <div class="progress-bar-container">
-                            <div class="progress-bar" [style.width.%]="currentStats.mem" [style.background-color]="getMemColor()"></div>
-                        </div>
-                        <div class="stat-value">{{currentStats.mem | number:'1.0-0'}}%</div>
+                        <ng-container *ngIf="ramStyle === 'text'; else ramBar">
+                            <div class="stat-value" [style.color]="getMemColor()">{{ getRamText() }}</div>
+                        </ng-container>
+                        <ng-template #ramBar>
+                            <div class="progress-bar-container">
+                                <div class="progress-bar" [style.width.%]="currentStats.mem" [style.background-color]="getMemColor()"></div>
+                            </div>
+                            <div class="stat-value">{{currentStats.mem | number:'1.0-0'}}%</div>
+                        </ng-template>
                     </div>
                 </div>
                 <div class="stat-separator"></div>
@@ -148,6 +153,8 @@ export class ServerStatsBottomBarComponent implements OnInit, OnDestroy {
     // CPU display: 'bar' (classic progress bar) or 'sparkline' (MobaXterm-like
     // history). Configurable; defaults to 'bar' to preserve existing behaviour.
     public cpuStyle: 'bar' | 'sparkline' = 'bar'
+    // RAM display: 'bar' (progress bar + %) or 'text' (used / total). Default 'bar'.
+    public ramStyle: 'bar' | 'text' = 'bar'
     @ViewChild('cpuSparkline') private cpuCanvas?: ElementRef<HTMLCanvasElement>
     public cpuHistory: number[] = []
     public sparklineBars = 40          // configurable, clamped 20..60
@@ -175,6 +182,15 @@ export class ServerStatsBottomBarComponent implements OnInit, OnDestroy {
         if (mem < 50) return '#2ecc71';
         if (mem < 80) return '#f1c40f';
         return '#e74c3c';
+    }
+
+    // "3.2G/8G" when absolute values are known, otherwise falls back to "NN%".
+    getRamText(): string {
+        const total = this.currentStats.memTotal;
+        if (total && total > 0) {
+            return `${formatBytes(this.currentStats.memUsed || 0)}/${formatBytes(total)}`;
+        }
+        return `${Math.round(this.currentStats.mem || 0)}%`;
     }
 
     getDiskColor(): string {
@@ -283,6 +299,7 @@ export class ServerStatsBottomBarComponent implements OnInit, OnDestroy {
         // 加载自定义指标配置
         this.customMetrics = conf.customMetrics || [];
         this.cpuStyle = conf.cpuStyle === 'sparkline' ? 'sparkline' : 'bar';
+        this.ramStyle = conf.ramStyle === 'text' ? 'text' : 'bar';
         this.sparklineBars = clampSparklineBars(conf.sparklineBars);
         // Keep history within the (possibly reduced) bar count.
         if (this.cpuHistory.length > this.sparklineBars) {

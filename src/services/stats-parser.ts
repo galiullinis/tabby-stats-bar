@@ -29,6 +29,8 @@ export interface FinalStats {
     netTx: number
     mem: number
     disk: number
+    memUsed?: number   // bytes
+    memTotal?: number  // bytes
     custom?: Array<{ id: string; value: string }>
 }
 
@@ -97,19 +99,19 @@ export function finalizeSample(
     now: number
 ): { stats: FinalStats; nextSample: DeltaSample | null } {
     if (sample.mode === 'V') {
-        // nums = [cpu, rx, tx, mem, disk]
-        const [cpu = 0, rx = 0, tx = 0, mem = 0, disk = 0] = sample.nums
+        // nums = [cpu, rx, tx, mem, memUsed, memTotal, disk]
+        const [cpu = 0, rx = 0, tx = 0, mem = 0, memUsed = 0, memTotal = 0, disk = 0] = sample.nums
         return {
-            stats: { cpu, netRx: rx, netTx: tx, mem, disk },
+            stats: { cpu, netRx: rx, netTx: tx, mem, disk, memUsed, memTotal },
             nextSample: null,
         }
     }
-    // Delta mode: nums = [cpuTotal, cpuIdle, rx, tx, mem, disk]
-    const [cpuTotal = 0, cpuIdle = 0, rx = 0, tx = 0, mem = 0, disk = 0] = sample.nums
+    // Delta mode: nums = [cpuTotal, cpuIdle, rx, tx, mem, memUsed, memTotal, disk]
+    const [cpuTotal = 0, cpuIdle = 0, rx = 0, tx = 0, mem = 0, memUsed = 0, memTotal = 0, disk = 0] = sample.nums
     const curr: DeltaSample = { cpuTotal, cpuIdle, rx, tx, t: now }
     const d = computeDeltaStats(prev, curr)
     return {
-        stats: { cpu: d.cpu, netRx: d.netRx, netTx: d.netTx, mem, disk },
+        stats: { cpu: d.cpu, netRx: d.netRx, netTx: d.netTx, mem, disk, memUsed, memTotal },
         nextSample: curr,
     }
 }
@@ -159,4 +161,25 @@ export function formatSpeed(bytes: number): string {
         i = sizes.length - 1
     }
     return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i]
+}
+
+/**
+ * Format a byte size into a short human string, e.g. 3.2G, 8.0G, 512.0M.
+ * Always keeps one decimal so the rendered width stays stable as values change
+ * (e.g. 5.4 → 5.0 instead of 5.4 → 5).
+ */
+export function formatBytes(bytes: number): string {
+    if (!bytes || bytes <= 0) {
+        return '0.0'
+    }
+    const k = 1024
+    const sizes = ['B', 'K', 'M', 'G', 'T', 'P']
+    let i = Math.floor(Math.log(bytes) / Math.log(k))
+    if (i < 0) {
+        i = 0
+    }
+    if (i >= sizes.length) {
+        i = sizes.length - 1
+    }
+    return (bytes / Math.pow(k, i)).toFixed(1) + sizes[i]
 }
