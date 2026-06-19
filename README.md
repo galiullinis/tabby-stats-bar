@@ -10,7 +10,7 @@ A plugin for [Tabby Terminal](https://github.com/Eugeny/tabby) that displays rea
 * **Custom Metrics Engine**: Define your own metrics using shell commands (e.g., GPU usage, Temperature, Docker container count).  
   * **Progress Bars**: Visual bars for percentage-based data.  
   * **Text Values**: Display raw data with units (e.g., "45°C", "3 Users").  
-* **Preset Library**: One-click import for common metrics (GPU, Uptime, Temperature, etc.) from the community repository (with an explicit confirmation — see Security below).  
+* **Built-in Presets**: Ready-made metrics (GPU, Uptime, Temperature, etc.) **bundled with the plugin** — no network access, nothing is downloaded. Adding one requires explicit confirmation (see Security below).  
 * **Flexible UI**:  
   * **Bottom Bar Mode**: An unobtrusive bar at the bottom of the terminal (docked inside the pane, won't overlap sidebars).  
   * **Floating Panel Mode**: A draggable widget that floats over the content. Under multi-input / split panes it shows the **last active window**'s stats.  
@@ -36,12 +36,14 @@ You can toggle visibility using the "Activity" icon in the toolbar.
 
 Go to **Settings \-\> Server Stats** to manage your metrics.
 
-#### **1\. Using the Preset Library (Recommended)**
+#### **1\. Using the Built-in Presets (Recommended)**
 
-1. Click the **"Fetch from GitHub"** button in the settings panel.  
-2. Browse the list of community presets (e.g., NVIDIA GPU, CPU Temp, Uptime).  
-3. Click **Add** next to the metric you want.  
+1. Browse the bundled presets in the settings panel, grouped by category (System, Network, GPU, Containers).  
+2. Click **Add** next to the metric you want.  
+3. Confirm the command (it runs on the active session — see Security).  
 4. It will immediately appear in your status bar.
+
+No presets are fetched from the internet; they ship with the plugin. To add your own permanently, edit `src/builtin-presets.ts` (see the "HOW TO ADD" comment) and rebuild, or just add a one-off via **Custom Metrics** below.
 
 #### **2\. Adding Manually**
 
@@ -63,11 +65,11 @@ In **Settings → Server Stats** you can configure:
 * **Background Color / Opacity**.
 * **Refresh Interval** — how often stats are fetched (1–60s). Only the active tab is polled.
 * **Debug Logging** — off by default. When enabled, diagnostic logs are written to a temp file (`tabby-server-stats.log`); useful only for troubleshooting.
-* **Custom Metrics & Preset Library**.
+* **Built-in Presets & Custom Metrics**.
 
 ## **Security**
 
-Custom metrics (including imported presets) are **shell commands that run on every server you connect to, on every refresh**. Presets are downloaded from a remote community repository, so adding one requires an explicit confirmation showing the exact command. Only add metrics whose commands you understand and trust.
+Custom metrics and built-in presets are **shell commands that run on the active session — locally or on the remote SSH host — on every refresh**. The plugin does **not** download commands from the internet: presets are bundled with the package. Adding any preset requires an explicit confirmation showing the exact command. Only add metrics whose commands you understand and trust.
 
 ## **License**
 
