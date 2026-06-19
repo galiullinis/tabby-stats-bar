@@ -47,6 +47,19 @@ const PRESETS_URL = 'https://raw.githubusercontent.com/kasuganosoras/tabby-serve
             </div>
         </div>
 
+        <!-- 调试日志开关 -->
+        <div class="form-line">
+            <div class="header">
+                <div class="title" translate>Debug Logging</div>
+                <div class="description" translate>Write diagnostic logs to a temp file. Off by default; enable only when troubleshooting.</div>
+            </div>
+            <div class="form-check form-switch">
+                <input type="checkbox" class="form-check-input"
+                    [(ngModel)]="config.store.plugin.serverStats.debug"
+                    (ngModelChange)="save()">
+            </div>
+        </div>
+
         <div class="separator"></div>
 
         <!-- 预设库区域 -->

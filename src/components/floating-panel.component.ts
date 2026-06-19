@@ -5,6 +5,8 @@ import { BaseChartDirective } from 'ng2-charts'
 import { ChartConfiguration, ChartData, ChartType } from 'chart.js'
 import { StatsService } from '../services/stats.service'
 import { CustomMetric } from '../config'
+import { formatSpeed } from '../services/stats-parser'
+import { resolveFocusedSession, LastActiveSessionTracker } from '../services/session-tracker'
 
 @Component({
     selector: 'server-stats-floating-panel',
@@ -144,6 +146,9 @@ export class ServerStatsFloatingPanelComponent implements OnInit, OnDestroy {
     public styleConfig = { background: 'rgba(20, 20, 20, 0.90)', size: 100, layout: 'vertical' }
     private timerId: any = null
     private tabSubscription: Subscription | null = null
+    // Tracks the most recently focused supported session so that, under
+    // multi-input / split panes, the panel shows the last active window's stats.
+    private lastActive = new LastActiveSessionTracker()
     public doughnutChartType: ChartType = 'doughnut'
     public chartOptions: ChartConfiguration<'doughnut'>['options'] = {
         responsive: true, maintainAspectRatio: false, cutout: '75%', 
@@ -217,11 +222,7 @@ export class ServerStatsFloatingPanelComponent implements OnInit, OnDestroy {
     }
 
     formatSpeed(bytes: number): string {
-        if (bytes === 0) return '0 B/s';
-        const k = 1024;
-        const sizes = ['B/s', 'K/s', 'M/s', 'G/s'];
-        const i = Math.floor(Math.log(bytes) / Math.log(k));
-        return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+        return formatSpeed(bytes);
     }
 
     startDrag(event: MouseEvent) {
@@ -302,7 +303,7 @@ export class ServerStatsFloatingPanelComponent implements OnInit, OnDestroy {
             }
             return;
         }
-        let activeTab: any = this.app.activeTab
+        const activeTab: any = this.app.activeTab
         if (!isEnabled || !activeTab) {
             if (this.visible) {
                 this.visible = false;
@@ -310,15 +311,17 @@ export class ServerStatsFloatingPanelComponent implements OnInit, OnDestroy {
             }
             return;
         }
-        if (activeTab['focusedTab']) {
-            activeTab = activeTab['focusedTab'];
-        }
-        const session = activeTab['session'];
+        // Resolve the focused leaf session (handles split panes / multi-input),
+        // then fall back to the last active supported session so the panel keeps
+        // showing the last active window rather than blanking out.
+        const focused = resolveFocusedSession(activeTab);
+        const focusedSupported = !!focused && this.statsService.isPlatformSupport(focused);
+        const session = this.lastActive.resolve(focused, focusedSupported);
         if (session && this.statsService.isPlatformSupport(session)) {
             try {
                 const data = await this.statsService.fetchStats(session)
                 if (data) {
-                    this.visible = true; 
+                    this.visible = true;
                     this.updateCharts(data);
                     this.cdr.detectChanges();
                     return;

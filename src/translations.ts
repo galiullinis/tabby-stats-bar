@@ -52,5 +52,7 @@ export const TRANSLATIONS = {
         'No presets found': '未找到预设',
         'Import commonly used metrics from the community': '从社区导入常用指标配置',
         'I want to submit my own preset': '我想提交我的预设',
+        'Debug Logging': '调试日志',
+        'Write diagnostic logs to a temp file. Off by default; enable only when troubleshooting.': '将诊断日志写入临时文件。默认关闭，仅在排查问题时启用。',
     }
 };

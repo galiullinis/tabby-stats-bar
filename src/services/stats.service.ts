@@ -2,6 +2,8 @@ import { Injectable } from '@angular/core'
 import { ConfigService } from 'tabby-core'
 import { CustomMetric } from '../config'
 import { exec } from 'child_process'
+import { MARKERS, parseStatsOutput, buildCustomMetricsFragment } from './stats-parser'
+import { execSshCommand } from './ssh-exec'
 
 @Injectable({ providedIn: 'root' })
 export class StatsService {
@@ -37,16 +39,10 @@ export class StatsService {
             }
 
             const customMetrics: CustomMetric[] = this.config.store.plugin.serverStats.customMetrics || [];
-            
-            let finalCommand = this.baseStatsCommand;
-            
-            if (customMetrics.length > 0) {
-                finalCommand += '; echo "TABBY-STATS-CUSTOM-START"; ';
-                const customCmds = customMetrics.map(m => `( ${m.command} ) || echo "Err"`).join('; echo "TABBY-STATS-NEXT"; ');
-                finalCommand += customCmds;
-            }
 
-            finalCommand += '; echo " TABBY-STATS-END"';
+            let finalCommand = this.baseStatsCommand;
+            finalCommand += buildCustomMetricsFragment(customMetrics);
+            finalCommand += `; echo " ${MARKERS.end}"`;
             finalCommand = finalCommand.replace(/\n/g, ' ');
             finalCommand = `/bin/sh -c '${finalCommand.replace(/'/g, "'\\''")}'`;
 
@@ -58,31 +54,7 @@ export class StatsService {
                 output = await this.execLocal(finalCommand);
             }
 
-            if (!output) {
-                this.fetchGuards.delete(session);
-                return null;
-            }
-
-            const result: any = {};
-            const match = output.match(/TABBY-STATS-START\s+([\d\.]+)\s+([\d\.]+)\s+([\d\.]+)\s+([\d\.]+)\s+([\d\.]+)/);
-
-            if (match && match.length >= 6) {
-                result.cpu = parseFloat(match[1]) || 0;
-                result.netRx = parseFloat(match[2]) || 0;
-                result.netTx = parseFloat(match[3]) || 0;
-                result.mem = parseFloat(match[4]) || 0;
-                result.disk = parseFloat(match[5]) || 0;
-            }
-
-            if (customMetrics.length > 0 && output.includes('TABBY-STATS-CUSTOM-START')) {
-                const customPart = output.split('TABBY-STATS-CUSTOM-START')[1].split('TABBY-STATS-END')[0];
-                const customValues = customPart.split('TABBY-STATS-NEXT').map(s => s.trim());
-                
-                result.custom = customMetrics.map((m, index) => ({
-                    id: m.id,
-                    value: customValues[index] || '-'
-                }));
-            }
+            const result = parseStatsOutput(output || '', customMetrics);
 
             this.fetchGuards.delete(session);
             return result;
@@ -108,80 +80,9 @@ export class StatsService {
         });
     }
 
-    private async exec(sshClient: any, cmd: string): Promise<string> {
-        const timeout = new Promise<never>((_, reject) => 
-            setTimeout(() => reject(new Error('Stats: Timeout')), 5000)
-        );
-
-        const run = async () => {
-            let channel: any = null;
-            try {
-                const newChannel = await sshClient.openSessionChannel();
-                channel = await sshClient.activateChannel(newChannel);
-            } catch (err) {
-                throw err;
-            }
-
-            return new Promise<string>((resolve, reject) => {
-                let buffer = '';
-                let resolved = false;
-                let subscription: any = null;
-                const decoder = new TextDecoder('utf-8');
-
-                const cleanup = () => {
-                    if (subscription) subscription.unsubscribe();
-                    if (channel) {
-                        try { channel.close(); } catch(e){}
-                    }
-                };
-
-                const processData = (chunk: any) => {
-                    let text = '';
-                    if (typeof chunk === 'string') {
-                        text = chunk;
-                    } else if (chunk instanceof ArrayBuffer || ArrayBuffer.isView(chunk)) {
-                        text = decoder.decode(chunk, { stream: true });
-                    } else {
-                        text = chunk.toString();
-                    }
-
-                    buffer += text;
-                    
-                    if (!resolved && buffer.includes('TABBY-STATS-END')) {
-                        resolved = true;
-                        cleanup();
-                        resolve(buffer);
-                    }
-                };
-
-                if (channel.data$) {
-                    subscription = channel.data$.subscribe(
-                        (data: any) => processData(data), 
-                        (err: any) => console.error('Stats: Data Stream Error', err)
-                    );
-                } else {
-                    cleanup();
-                    reject(new Error('Channel has no data$ observable'));
-                    return;
-                }
-
-                if (typeof channel.requestExec === 'function') {
-                    channel.requestExec(cmd).catch((err: any) => {
-                        cleanup();
-                        reject(err);
-                    });
-                } else if (typeof channel.exec === 'function') {
-                    channel.exec(cmd).catch((err: any) => {
-                        cleanup();
-                        reject(err);
-                    });
-                } else {
-                    cleanup();
-                    reject(new Error('Channel has no requestExec or exec method'));
-                }
-            });
-        };
-
-        return Promise.race([run(), timeout]);
+    private exec(sshClient: any, cmd: string): Promise<string> {
+        // Delegates to execSshCommand, which guarantees the channel and the
+        // data$ subscription are torn down on success, error AND timeout.
+        return execSshCommand(sshClient, cmd, { timeoutMs: 5000, endMarker: MARKERS.end });
     }
 }

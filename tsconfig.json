@@ -9,6 +9,7 @@
     "rootDir": "src",
     "moduleResolution": "node",
     "importHelpers": true,
+    "skipLibCheck": true,
     "lib": [
       "es2017",
       "dom"
@@ -26,6 +27,8 @@
   },
   "exclude": [
     "node_modules",
-    "dist"
+    "dist",
+    "test",
+    "jest.config.js"
   ]
 }

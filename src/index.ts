@@ -26,13 +26,21 @@ type TabInstance = {
 }
 
 const LOG_PATH = path.join(os.tmpdir(), 'tabby-server-stats.log')
+
+// Logging is OFF by default. It is enabled only when the user turns on the
+// `debug` flag in the plugin settings. Previously logDebug() did a synchronous
+// fs.appendFileSync() on the renderer thread for every state event and the log
+// grew without bound — both undesirable for a perf-sensitive plugin.
+let debugLoggingEnabled = false
+export const setDebugLogging = (enabled: boolean) => { debugLoggingEnabled = !!enabled }
 const logDebug = (message: string) => {
+    if (!debugLoggingEnabled) {
+        return
+    }
     try {
         fs.appendFileSync(LOG_PATH, `${new Date().toISOString()} ${message}\n`)
     } catch {}
 }
-
-logDebug('[init] module loaded')
 
 @NgModule({
     imports: [CommonModule, FormsModule, NgChartsModule, TabbyCoreModule, NgbModule], 
@@ -52,16 +60,10 @@ export default class ServerStatsModule {
     private tabInstances: WeakMap<HTMLElement, TabInstance> = new WeakMap()
     private attachedTabs = new Set<HTMLElement>()
     private tabElementMap = new Map<HTMLElement, any>()
-    private observer: MutationObserver | null = null
     private disposables: Array<() => void> = []
     private styleNode: HTMLStyleElement | null = null
-    private observerRetry: any = null
+    private retryTimer: any = null
     private failed = false
-    private mutationScheduled = false
-    private pendingAdded = new Set<HTMLElement>()
-    private pendingRemoved = new Set<HTMLElement>()
-    private mutationBurst = 0
-    private mutationBurstTimer: any = null
     private scanTimer: any = null
 
     constructor(
@@ -73,8 +75,10 @@ export default class ServerStatsModule {
         private statsService: StatsService,
         translate: TranslateService
     ) {
+        this.syncDebugLogging()
         logDebug('[init] constructor start')
         this.config.ready$.subscribe(() => {
+            this.syncDebugLogging()
             setTimeout(() => {
                 this.safeRun('translations', () => {
                     for (const [lang, trans] of Object.entries(TRANSLATIONS)) {
@@ -92,10 +96,15 @@ export default class ServerStatsModule {
         })
 
         this.config.changed$.subscribe(() => {
+            this.syncDebugLogging()
             logDebug('[event] config.changed')
             this.safeRun('applyDisplayMode:changed', () => this.applyDisplayMode(this.getDisplayMode()))
         })
         logDebug('[init] constructor end')
+    }
+
+    private syncDebugLogging() {
+        setDebugLogging(!!this.config.store?.plugin?.serverStats?.debug)
     }
 
     private getDisplayMode() {
@@ -153,7 +162,6 @@ export default class ServerStatsModule {
         this.safeRun('rebuildTabElementMap', () => this.rebuildTabElementMap())
         this.safeRun('attachExistingTabs', () => this.attachExistingTabs())
         this.safeRun('observeTabLifecycle', () => this.observeTabLifecycle())
-        this.safeRun('startMutationObserver', () => this.startMutationObserver())
         this.safeRun('startScanTimer', () => this.startScanTimer())
     }
 
@@ -162,7 +170,7 @@ export default class ServerStatsModule {
             return
         }
         if (!document.head) {
-            this.scheduleObserverRetry()
+            this.scheduleRetry()
             return
         }
         logDebug('[state] ensureGlobalStyle')
@@ -193,7 +201,7 @@ export default class ServerStatsModule {
         const content = document.querySelector('app-root > div > .content')
         if (!content) {
             logDebug('[state] attachExistingTabs: no content')
-            this.scheduleObserverRetry()
+            this.scheduleRetry()
             return
         }
         this.rebuildTabElementMap()
@@ -202,128 +210,25 @@ export default class ServerStatsModule {
         candidates.forEach(el => this.attachToSshTab(el as HTMLElement))
     }
 
-    private startMutationObserver() {
-        const target = this.getObserverTarget()
-        if (!target) {
-            logDebug('[state] startMutationObserver: no target')
-            this.scheduleObserverRetry()
+    // The plugin used to run a global MutationObserver with `subtree: true` over
+    // the whole `.content` area to detect new ssh-tab elements. That made it react
+    // to xterm.js's constant in-terminal DOM churn — a main-thread CPU hot path that
+    // could freeze the entire UI. Tab discovery is now driven exclusively by Tabby's
+    // own lifecycle observables (tabOpened$ / tabsChanged$ / tabRemoved$ / tabClosed$)
+    // plus a light periodic scan timer (startScanTimer). No DOM mutation watching.
+    private scheduleRetry() {
+        if (this.retryTimer) {
             return
         }
-        logDebug('[state] startMutationObserver: ok')
-        if (this.observer) {
-            this.observer.disconnect()
-        }
-        this.observer = new MutationObserver(mutations => {
-            let relevant = 0
-            mutations.forEach(mutation => {
-                // Ignore DOM churn that happens *inside* an existing terminal tab.
-                // xterm.js continuously rewrites its own DOM (rendered output and the
-                // blinking cursor); reacting to that turned this observer into a CPU
-                // hot path (100% main-thread JS). New ssh-tab elements are inserted at
-                // the tab-host level, whose target is not inside an ssh-tab, so they
-                // are still captured.
-                const target = mutation.target as HTMLElement
-                if (target && typeof target.closest === 'function' && target.closest('ssh-tab')) {
-                    return
-                }
-                mutation.addedNodes.forEach(node => this.queueMutationNode(node, true))
-                mutation.removedNodes.forEach(node => this.queueMutationNode(node, false))
-                relevant++
-            })
-            // Only count tab-level mutations toward the burst breaker, so ordinary
-            // terminal output (filtered out above) never trips it.
-            if (relevant > 0) {
-                this.trackMutationBurst(relevant)
-                this.flushMutationQueue()
-            }
-        })
-        this.observer.observe(target, { childList: true, subtree: true })
-    }
-
-    private queueMutationNode(node: Node, added: boolean) {
-        if (!(node instanceof HTMLElement)) {
-            return
-        }
-        if (added) {
-            this.pendingAdded.add(node)
-        } else {
-            this.pendingRemoved.add(node)
-        }
-    }
-
-    private flushMutationQueue() {
-        if (this.mutationScheduled) {
-            return
-        }
-        this.mutationScheduled = true
-        window.setTimeout(() => {
-            this.mutationScheduled = false
-            this.pendingAdded.forEach(node => this.scanNodeForTabs(node))
-            this.pendingRemoved.forEach(node => this.handleRemovedNode(node))
-            this.pendingAdded.clear()
-            this.pendingRemoved.clear()
-        }, 0)
-    }
-
-    private getObserverTarget(): HTMLElement | null {
-        return (document.querySelector('app-root > div > .content') as HTMLElement) || null
-    }
-
-    private trackMutationBurst(count: number) {
-        this.mutationBurst += count
-        if (!this.mutationBurstTimer) {
-            this.mutationBurstTimer = window.setTimeout(() => {
-                this.mutationBurst = 0
-                this.mutationBurstTimer = null
-            }, 1000)
-        }
-        if (this.mutationBurst > 2000 && this.observer) {
-            logDebug('[state] mutation burst detected, disabling observer')
-            this.observer.disconnect()
-            this.observer = null
-        }
-    }
-
-    private scheduleObserverRetry() {
-        if (this.observerRetry) {
-            return
-        }
-        logDebug('[state] scheduleObserverRetry')
-        this.observerRetry = window.setTimeout(() => {
-            this.observerRetry = null
+        logDebug('[state] scheduleRetry')
+        this.retryTimer = window.setTimeout(() => {
+            this.retryTimer = null
             if (this.activeDisplayMode === 'bottomBar') {
-                logDebug('[state] observerRetry tick')
+                logDebug('[state] retry tick')
                 this.safeRun('ensureGlobalStyle:retry', () => this.ensureGlobalStyle())
                 this.safeRun('attachExistingTabs:retry', () => this.attachExistingTabs())
-                this.safeRun('startMutationObserver:retry', () => this.startMutationObserver())
             }
         }, 250)
-    }
-
-    private scanNodeForTabs(node: Node) {
-        if (!(node instanceof HTMLElement)) {
-            return
-        }
-        if (node.tagName && node.tagName.toLowerCase() === 'ssh-tab') {
-            this.attachToSshTab(node)
-            return
-        }
-        const inner = node.querySelectorAll('ssh-tab')
-        inner.forEach(el => this.attachToSshTab(el as HTMLElement))
-    }
-
-    private handleRemovedNode(node: Node) {
-        if (!(node instanceof HTMLElement)) {
-            return
-        }
-        if (node.tagName && node.tagName.toLowerCase() === 'ssh-tab') {
-            if (this.tabInstances.has(node)) {
-                this.detachFromTab(node)
-            }
-            return
-        }
-        const inner = node.querySelectorAll('ssh-tab')
-        inner.forEach(el => this.detachFromTab(el as HTMLElement))
     }
 
     private startScanTimer() {
@@ -600,13 +505,13 @@ export default class ServerStatsModule {
     }
 
     private teardownAllTabs() {
-        if (this.observer) {
-            this.observer.disconnect()
-            this.observer = null
-        }
         if (this.scanTimer) {
             clearInterval(this.scanTimer)
             this.scanTimer = null
+        }
+        if (this.retryTimer) {
+            clearTimeout(this.retryTimer)
+            this.retryTimer = null
         }
         this.disposables.forEach(fn => fn())
         this.disposables = []

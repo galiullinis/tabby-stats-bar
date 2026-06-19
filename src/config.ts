@@ -17,6 +17,7 @@ export class ServerStatsConfigProvider extends ConfigProvider {
         plugin: {
             serverStats: {
                 enabled: true,
+                debug: false,
                 displayMode: 'bottomBar',
                 location: { x: null, y: null },
                 style: {
