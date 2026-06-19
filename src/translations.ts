@@ -67,5 +67,11 @@ export const TRANSLATIONS = {
         'GPU': 'GPU',
         'Containers': '容器',
         'Other': '其他',
+        'CPU Display': 'CPU 显示',
+        'Classic progress bar or a MobaXterm-like history sparkline (bottom bar only).': '经典进度条，或类似 MobaXterm 的历史迷你图（仅底部栏）。',
+        'Sparkline': '迷你图',
+        'Sparkline Bars': '迷你图列数',
+        'Number of CPU history bars shown (20–60).': '显示的 CPU 历史列数（20–60）。',
+        'bars': '列',
     }
 };

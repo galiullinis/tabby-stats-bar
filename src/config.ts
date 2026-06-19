@@ -19,6 +19,8 @@ export class ServerStatsConfigProvider extends ConfigProvider {
                 enabled: true,
                 debug: false,
                 pollInterval: 5,
+                cpuStyle: 'bar',
+                sparklineBars: 40,
                 displayMode: 'bottomBar',
                 location: { x: null, y: null },
                 style: {
