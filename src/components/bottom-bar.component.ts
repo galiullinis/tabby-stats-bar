@@ -2,8 +2,9 @@ import { Component, OnInit, OnDestroy, ChangeDetectorRef, NgZone } from '@angula
 import { Subscription } from 'rxjs'
 import { AppService, ConfigService } from 'tabby-core'
 import { StatsService } from '../services/stats.service'
-import { CustomMetric, POLL_INTERVAL_MS } from '../config'
+import { CustomMetric } from '../config'
 import { formatSpeed } from '../services/stats-parser'
+import { clampPollIntervalMs } from '../services/poll-timing'
 
 @Component({
     selector: 'server-stats-bottom-bar',
@@ -249,7 +250,7 @@ export class ServerStatsBottomBarComponent implements OnInit, OnDestroy {
         this.zone.runOutsideAngular(() => {
             this.timerId = window.setInterval(() => {
                 this.zone.run(() => { this.checkAndFetch() })
-            }, POLL_INTERVAL_MS)
+            }, clampPollIntervalMs(this.config.store?.plugin?.serverStats?.pollInterval))
         })
     }
 
@@ -266,8 +267,6 @@ export class ServerStatsBottomBarComponent implements OnInit, OnDestroy {
     formatSpeed(bytes: number): string {
         return formatSpeed(bytes);
     }
-
-    forceUpdate() { this.checkAndFetch() }
 
     async checkAndFetch() {
         if (this.useExternalController) {

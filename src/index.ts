@@ -9,7 +9,8 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 
-import { ServerStatsConfigProvider, POLL_INTERVAL_MS } from './config'
+import { ServerStatsConfigProvider } from './config'
+import { clampPollIntervalMs, nextBackoffMs } from './services/poll-timing'
 import { TRANSLATIONS } from './translations'
 import { StatsService } from './services/stats.service'
 import { StatsToolbarButtonProvider } from './toolbar-button.provider'
@@ -19,7 +20,8 @@ import { ServerStatsSettingsComponent, ServerStatsSettingsTabProvider } from './
 
 type TabInstance = {
     teardown: () => void
-    runPoll: () => Promise<void> | void
+    // Returns false when a fetch was attempted but produced no data (drives backoff).
+    runPoll: () => Promise<boolean> | boolean
     collector: () => Promise<any>
     state: any
     configSub: any
@@ -66,6 +68,7 @@ export default class ServerStatsModule {
     private failed = false
     private scanTimer: any = null
     private pollTimer: any = null
+    private pollBackoffMs = 0
     // Cache of the last leaf-tab list, so rebuildTabElementMap() can skip work
     // when the set of tabs has not actually changed.
     private cachedLeafTabs: any[] = []
@@ -170,32 +173,62 @@ export default class ServerStatsModule {
         this.safeRun('startPollTimer', () => this.startPollTimer())
     }
 
+    private getPollIntervalMs(): number {
+        return clampPollIntervalMs(this.config.store?.plugin?.serverStats?.pollInterval)
+    }
+
     // Single central poll loop for ALL per-tab bars. Only the bar(s) belonging to
     // the currently active top-level tab are fetched — background tabs (and panes
-    // in non-active split tabs) are skipped entirely. Previously every tab ran its
-    // own 3s interval, so N background SSH tabs meant N channels opened every 3s.
+    // in non-active split tabs) are skipped entirely.
+    //
+    // It is a SELF-RESCHEDULING loop (setTimeout, not setInterval): the next poll
+    // is scheduled only AFTER the current one settles, which structurally prevents
+    // overlap even at very short intervals. On failure it backs off exponentially.
     private startPollTimer() {
         if (this.pollTimer) {
             return
         }
-        this.pollTimer = window.setInterval(() => {
-            if (this.activeDisplayMode !== 'bottomBar') {
-                return
-            }
-            this.pollActiveTabs()
-        }, POLL_INTERVAL_MS)
+        this.scheduleNextPoll(0)
     }
 
-    private pollActiveTabs() {
+    private scheduleNextPoll(delay: number) {
+        this.pollTimer = window.setTimeout(async () => {
+            this.pollTimer = null
+            if (this.activeDisplayMode !== 'bottomBar') {
+                // Stay alive but idle; re-check at the normal cadence.
+                this.scheduleNextPoll(this.getPollIntervalMs())
+                return
+            }
+            let ok = true
+            try {
+                ok = await this.pollActiveTabsOnce()
+            } catch {
+                ok = false
+            }
+            this.pollBackoffMs = nextBackoffMs(this.pollBackoffMs, !ok)
+            this.scheduleNextPoll(this.getPollIntervalMs() + this.pollBackoffMs)
+        }, delay)
+    }
+
+    // Polls every active bar once, awaiting them all. Returns false only when a
+    // poll was attempted and produced no data (error/timeout) — that drives the
+    // backoff. "Nothing to poll" / "intentionally hidden" count as success.
+    private async pollActiveTabsOnce(): Promise<boolean> {
+        const polls: Array<Promise<boolean>> = []
         this.attachedTabs.forEach(el => {
             if (!this.isSshTabActive(el)) {
                 return
             }
             const instance = this.tabInstances.get(el)
             if (instance && typeof instance.runPoll === 'function') {
-                instance.runPoll()
+                polls.push(Promise.resolve(instance.runPoll()).then(r => r !== false).catch(() => false))
             }
         })
+        if (!polls.length) {
+            return true
+        }
+        const results = await Promise.all(polls)
+        return results.some(r => r)
     }
 
     // An ssh-tab is "active" when it lives inside the currently active top-level
@@ -346,39 +379,35 @@ export default class ServerStatsModule {
             return { data, session: activeSession, supported: true }
         }
 
-        const runPoll = async () => {
+        // Returns true on success or when intentionally hidden; false only when a
+        // fetch was attempted but yielded no data (so the scheduler can back off).
+        const runPoll = async (): Promise<boolean> => {
             const isEnabled = this.config.store.plugin?.serverStats?.enabled
             const displayMode = this.getDisplayMode()
             if (!isEnabled || displayMode !== 'bottomBar') {
                 if ((barRef.instance as any).hideExternal) {
                     (barRef.instance as any).hideExternal()
                 }
-                return
+                return true
             }
             const result = await collector()
-            if (!result) {
-                return
-            }
-            if (!result.session) {
+            if (!result || !result.session || !result.supported) {
                 if ((barRef.instance as any).hideExternal) {
                     (barRef.instance as any).hideExternal()
                 }
-                return
-            }
-            if (!result.supported) {
-                if ((barRef.instance as any).hideExternal) {
-                    (barRef.instance as any).hideExternal()
-                }
-                return
+                return true
             }
             if (result.data) {
                 state.last = result.data
                 if ((barRef.instance as any).renderExternalStats) {
                     (barRef.instance as any).renderExternalStats(result.data)
                 }
-            } else if ((barRef.instance as any).setExternalLoading) {
+                return true
+            }
+            if ((barRef.instance as any).setExternalLoading) {
                 (barRef.instance as any).setExternalLoading(false)
             }
+            return false
         }
 
         const syncOnConfigChange = () => {
@@ -542,15 +571,14 @@ export default class ServerStatsModule {
         })
         // Poll the newly-active tab immediately on switch so its bar refreshes
         // without waiting for the next central tick.
-        const activeTabChange = (this.app as any).activeTabChange$?.subscribe?.(() => {
+        const onActiveTabChange = () => {
             if (this.activeDisplayMode === 'bottomBar') {
-                this.pollActiveTabs()
+                // Fire-and-forget immediate refresh of the newly-active tab.
+                this.pollActiveTabsOnce()
             }
-        }) || (this.app as any).activeTabChange?.subscribe?.(() => {
-            if (this.activeDisplayMode === 'bottomBar') {
-                this.pollActiveTabs()
-            }
-        })
+        }
+        const activeTabChange = (this.app as any).activeTabChange$?.subscribe?.(onActiveTabChange)
+            || (this.app as any).activeTabChange?.subscribe?.(onActiveTabChange)
 
         ;[tabRemoved, tabClosed, tabOpened, tabsChanged, activeTabChange].forEach(sub => {
             if (sub && typeof sub.unsubscribe === 'function') {
@@ -579,9 +607,10 @@ export default class ServerStatsModule {
             this.scanTimer = null
         }
         if (this.pollTimer) {
-            clearInterval(this.pollTimer)
+            clearTimeout(this.pollTimer)
             this.pollTimer = null
         }
+        this.pollBackoffMs = 0
         if (this.retryTimer) {
             clearTimeout(this.retryTimer)
             this.retryTimer = null

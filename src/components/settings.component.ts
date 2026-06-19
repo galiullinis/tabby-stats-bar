@@ -47,6 +47,20 @@ const PRESETS_URL = 'https://raw.githubusercontent.com/kasuganosoras/tabby-serve
             </div>
         </div>
 
+        <!-- 刷新间隔 -->
+        <div class="form-line">
+            <div class="header">
+                <div class="title" translate>Refresh Interval</div>
+                <div class="description" translate>How often stats are fetched (seconds). Only the active tab is polled. Minimum 1s.</div>
+            </div>
+            <div class="d-flex align-items-center">
+                <input type="number" class="form-control" style="width: 90px;" min="1" max="60" step="1"
+                    [(ngModel)]="config.store.plugin.serverStats.pollInterval"
+                    (ngModelChange)="onIntervalChange($event)">
+                <span class="text-muted ms-2" translate>seconds</span>
+            </div>
+        </div>
+
         <!-- 调试日志开关 -->
         <div class="form-line">
             <div class="header">
@@ -227,21 +241,33 @@ export class ServerStatsSettingsComponent {
 
     constructor(
         private platform: PlatformService,
+        private translate: TranslateService,
         public config: ConfigService) {}
 
     get customMetrics(): CustomMetric[] {
         return this.config.store.plugin.serverStats.customMetrics || [];
     }
     
+    onIntervalChange(value: any) {
+        let seconds = Math.round(Number(value));
+        if (!Number.isFinite(seconds)) seconds = 5;
+        seconds = Math.min(60, Math.max(1, seconds));
+        this.config.store.plugin.serverStats.pollInterval = seconds;
+        this.save();
+    }
+
     async fetchPresets() {
         this.loadingPresets = true;
         this.fetchError = false;
         this.presets = [];
 
+        // Abort the request if it hangs, so the settings UI never gets stuck.
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 10000);
         try {
-            const response = await fetch(PRESETS_URL);
+            const response = await fetch(PRESETS_URL, { signal: controller.signal });
             if (!response.ok) throw new Error('Network response was not ok');
-            
+
             const data = await response.json();
             if (Array.isArray(data)) {
                 this.presets = data;
@@ -252,11 +278,24 @@ export class ServerStatsSettingsComponent {
             console.error('Failed to fetch presets:', e);
             this.fetchError = true;
         } finally {
+            clearTimeout(timer);
             this.loadingPresets = false;
         }
     }
 
     addPreset(preset: Partial<CustomMetric>) {
+        // SECURITY: presets are downloaded from a remote URL and their `command`
+        // is executed on every server you connect to, every poll cycle. Make the
+        // user explicitly confirm the exact command before adding it.
+        const cmd = preset.command || '';
+        const warning = this.translate.instant(
+            'This preset will run the following shell command on your servers on every refresh:'
+        );
+        const confirmRun = this.translate.instant('Add this metric?');
+        if (!confirm(`${warning}\n\n${cmd}\n\n${confirmRun}`)) {
+            return;
+        }
+
         if (!this.config.store.plugin.serverStats.customMetrics) {
             this.config.store.plugin.serverStats.customMetrics = [];
         }

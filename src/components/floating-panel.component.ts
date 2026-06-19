@@ -4,8 +4,9 @@ import { AppService, ConfigService } from 'tabby-core'
 import { BaseChartDirective } from 'ng2-charts'
 import { ChartConfiguration, ChartData, ChartType } from 'chart.js'
 import { StatsService } from '../services/stats.service'
-import { CustomMetric, POLL_INTERVAL_MS } from '../config'
+import { CustomMetric } from '../config'
 import { formatSpeed } from '../services/stats-parser'
+import { clampPollIntervalMs, nextBackoffMs } from '../services/poll-timing'
 import { resolveFocusedSession, LastActiveSessionTracker } from '../services/session-tracker'
 
 @Component({
@@ -145,6 +146,7 @@ export class ServerStatsFloatingPanelComponent implements OnInit, OnDestroy {
     public pos = { x: null as number | null, y: null as number | null }
     public styleConfig = { background: 'rgba(20, 20, 20, 0.90)', size: 100, layout: 'vertical' }
     private timerId: any = null
+    private pollBackoffMs = 0
     private tabSubscription: Subscription | null = null
     // Tracks the most recently focused supported session so that, under
     // multi-input / split panes, the panel shows the last active window's stats.
@@ -167,7 +169,6 @@ export class ServerStatsFloatingPanelComponent implements OnInit, OnDestroy {
         private cdr: ChangeDetectorRef,
         private zone: NgZone
     ) {
-        (window as any).serverStatsFloating = this;
     }
 
     private createChartData(color: string): ChartData<'doughnut'> {
@@ -183,21 +184,40 @@ export class ServerStatsFloatingPanelComponent implements OnInit, OnDestroy {
             this.loadConfig();
             setTimeout(() => this.checkAndFetch(), 100);
         });
-        this.config.changed$.subscribe(() => this.loadConfig());
+        // Refresh immediately on config changes (e.g. toolbar enable toggle),
+        // not just on the next poll tick.
+        this.config.changed$.subscribe(() => {
+            this.loadConfig();
+            this.checkAndFetch();
+        });
 
         this.tabSubscription = (this.app as any).activeTabChange.subscribe(() => {
             this.checkAndFetch();
         });
 
-        setTimeout(() => this.checkAndFetch(), 100);
-
+        // Self-rescheduling poll loop (no fixed setInterval): the next tick is
+        // scheduled only after the current fetch settles, preventing overlap at
+        // short intervals; failures back off exponentially.
         this.zone.runOutsideAngular(() => {
-            this.timerId = window.setInterval(() => {
-                this.zone.run(() => {
-                    this.checkAndFetch()
-                })
-            }, POLL_INTERVAL_MS)
+            this.scheduleNextPoll(100)
         })
+    }
+
+    private scheduleNextPoll(delay: number) {
+        this.timerId = window.setTimeout(async () => {
+            let ok = true
+            try {
+                ok = await this.zone.run(() => this.checkAndFetch())
+            } catch {
+                ok = false
+            }
+            this.pollBackoffMs = nextBackoffMs(this.pollBackoffMs, !ok)
+            this.scheduleNextPoll(this.getPollIntervalMs() + this.pollBackoffMs)
+        }, delay)
+    }
+
+    private getPollIntervalMs(): number {
+        return clampPollIntervalMs(this.config.store?.plugin?.serverStats?.pollInterval)
     }
 
     loadConfig() {
@@ -291,9 +311,9 @@ export class ServerStatsFloatingPanelComponent implements OnInit, OnDestroy {
         this.adjustPositionToViewport();
     }
 
-    forceUpdate() { this.checkAndFetch() }
-
-    async checkAndFetch() {
+    // Returns true on success or when intentionally hidden; false only when a
+    // fetch was attempted but produced no data (drives the loop backoff).
+    async checkAndFetch(): Promise<boolean> {
         const isEnabled = this.config.store.plugin?.serverStats?.enabled;
         const displayMode = this.config.store.plugin?.serverStats?.displayMode || 'bottomBar';
         if (displayMode !== 'floatingPanel') {
@@ -301,7 +321,7 @@ export class ServerStatsFloatingPanelComponent implements OnInit, OnDestroy {
                 this.visible = false;
                 this.cdr.detectChanges();
             }
-            return;
+            return true;
         }
         const activeTab: any = this.app.activeTab
         if (!isEnabled || !activeTab) {
@@ -309,7 +329,7 @@ export class ServerStatsFloatingPanelComponent implements OnInit, OnDestroy {
                 this.visible = false;
                 this.cdr.detectChanges();
             }
-            return;
+            return true;
         }
         // Resolve the focused leaf session (handles split panes / multi-input),
         // then fall back to the last active supported session so the panel keeps
@@ -324,14 +344,21 @@ export class ServerStatsFloatingPanelComponent implements OnInit, OnDestroy {
                     this.visible = true;
                     this.updateCharts(data);
                     this.cdr.detectChanges();
-                    return;
+                    return true;
                 }
             } catch (e) {}
+            // Attempted a fetch on a supported session but got nothing → soft fail.
+            if (this.visible) {
+                this.visible = false;
+                this.cdr.detectChanges();
+            }
+            return false;
         }
         if (this.visible) {
             this.visible = false;
             this.cdr.detectChanges();
         }
+        return true;
     }
 
     getCustomValue(index: number): string {
@@ -371,7 +398,7 @@ export class ServerStatsFloatingPanelComponent implements OnInit, OnDestroy {
     }
 
     ngOnDestroy() {
-        if (this.timerId) clearInterval(this.timerId)
+        if (this.timerId) clearTimeout(this.timerId)
         if (this.tabSubscription) this.tabSubscription.unsubscribe()
     }
 }

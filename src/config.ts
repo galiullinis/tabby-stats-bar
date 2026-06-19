@@ -1,11 +1,6 @@
 import { Injectable } from '@angular/core'
 import { ConfigProvider } from 'tabby-core'
 
-// Polling cadence shared by both display modes. Increased from 3s to 5s to cut
-// steady-state load (fewer SSH channels / shell spawns), and combined with the
-// active-tab-only scheduler so background tabs are not polled at all.
-export const POLL_INTERVAL_MS = 5000
-
 export interface CustomMetric {
     id: string
     label: string
@@ -23,6 +18,7 @@ export class ServerStatsConfigProvider extends ConfigProvider {
             serverStats: {
                 enabled: true,
                 debug: false,
+                pollInterval: 5,
                 displayMode: 'bottomBar',
                 location: { x: null, y: null },
                 style: {

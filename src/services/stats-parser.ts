@@ -10,7 +10,20 @@ export const MARKERS = {
     end: 'TABBY-STATS-END',
 }
 
-export interface ParsedStats {
+// Sample "mode" emitted right after the START marker:
+//   D = delta  → raw kernel counters (Linux /proc); CPU% and net rate are
+//                computed CLIENT-SIDE by diffing against the previous sample,
+//                so the remote command does NOT sleep (enables fast polling).
+//   V = values → already-computed values (macOS, where cheap raw deltas are not
+//                readily available); used as-is.
+export type SampleMode = 'D' | 'V'
+
+export interface RawSample {
+    mode: SampleMode
+    nums: number[]
+}
+
+export interface FinalStats {
     cpu: number
     netRx: number
     netTx: number
@@ -19,43 +32,102 @@ export interface ParsedStats {
     custom?: Array<{ id: string; value: string }>
 }
 
-const STATS_RE = new RegExp(
-    `${MARKERS.start}\\s+([\\d.]+)\\s+([\\d.]+)\\s+([\\d.]+)\\s+([\\d.]+)\\s+([\\d.]+)`
-)
+// Raw delta-mode counters + capture timestamp (ms).
+export interface DeltaSample {
+    cpuTotal: number
+    cpuIdle: number
+    rx: number
+    tx: number
+    t: number
+}
 
-/**
- * Parse the raw stdout produced by the stats command into a structured object.
- * Pure function — no side effects, safe to unit-test.
- */
-export function parseStatsOutput(output: string, customMetrics: CustomMetric[] = []): ParsedStats | null {
+const BASE_RE = new RegExp(`${MARKERS.start}\\s+([DV])((?:\\s+-?[\\d.]+)+)`)
+
+// If two consecutive samples are further apart than this, treat the new one as a
+// fresh start (the counters / wall-clock gap would otherwise smear the rate).
+const MAX_DELTA_GAP_MS = 30_000
+
+const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v))
+
+/** Parse the base `START <mode> <numbers...>` line. Pure. */
+export function parseBaseSample(output: string): RawSample | null {
     if (!output) {
         return null
     }
-
-    const result: ParsedStats = { cpu: 0, netRx: 0, netTx: 0, mem: 0, disk: 0 }
-    const match = output.match(STATS_RE)
-
-    if (match && match.length >= 6) {
-        result.cpu = parseFloat(match[1]) || 0
-        result.netRx = parseFloat(match[2]) || 0
-        result.netTx = parseFloat(match[3]) || 0
-        result.mem = parseFloat(match[4]) || 0
-        result.disk = parseFloat(match[5]) || 0
-    } else {
-        // No base block at all — nothing usable.
+    const m = output.match(BASE_RE)
+    if (!m) {
         return null
     }
+    const nums = m[2].trim().split(/\s+/).map(Number).filter(n => !Number.isNaN(n))
+    return { mode: m[1] as SampleMode, nums }
+}
 
-    if (customMetrics.length > 0 && output.includes(MARKERS.customStart)) {
-        const customPart = output.split(MARKERS.customStart)[1].split(MARKERS.end)[0]
-        const customValues = customPart.split(MARKERS.next).map(s => s.trim())
-        result.custom = customMetrics.map((m, index) => ({
-            id: m.id,
-            value: customValues[index] || '-',
-        }))
+/**
+ * Compute instantaneous CPU% and network byte/s rates from two delta samples.
+ * Returns zeros for the first sample, a non-positive interval, a stale gap, or a
+ * counter reset (curr < prev). Pure.
+ */
+export function computeDeltaStats(
+    prev: DeltaSample | null | undefined,
+    curr: DeltaSample
+): { cpu: number; netRx: number; netTx: number } {
+    if (!prev) {
+        return { cpu: 0, netRx: 0, netTx: 0 }
     }
+    const dtSec = (curr.t - prev.t) / 1000
+    if (dtSec <= 0 || dtSec > MAX_DELTA_GAP_MS / 1000) {
+        return { cpu: 0, netRx: 0, netTx: 0 }
+    }
+    const totalD = curr.cpuTotal - prev.cpuTotal
+    const idleD = curr.cpuIdle - prev.cpuIdle
+    const cpu = totalD <= 0 ? 0 : clamp(((totalD - idleD) / totalD) * 100, 0, 100)
+    const netRx = Math.max(0, curr.rx - prev.rx) / dtSec
+    const netTx = Math.max(0, curr.tx - prev.tx) / dtSec
+    return { cpu, netRx, netTx }
+}
 
-    return result
+/**
+ * Turn a parsed RawSample (+ optional previous delta sample) into final stats.
+ * For delta mode, also returns the `nextSample` to remember for the next cycle.
+ * Pure — the caller owns per-session state.
+ */
+export function finalizeSample(
+    sample: RawSample,
+    prev: DeltaSample | null | undefined,
+    now: number
+): { stats: FinalStats; nextSample: DeltaSample | null } {
+    if (sample.mode === 'V') {
+        // nums = [cpu, rx, tx, mem, disk]
+        const [cpu = 0, rx = 0, tx = 0, mem = 0, disk = 0] = sample.nums
+        return {
+            stats: { cpu, netRx: rx, netTx: tx, mem, disk },
+            nextSample: null,
+        }
+    }
+    // Delta mode: nums = [cpuTotal, cpuIdle, rx, tx, mem, disk]
+    const [cpuTotal = 0, cpuIdle = 0, rx = 0, tx = 0, mem = 0, disk = 0] = sample.nums
+    const curr: DeltaSample = { cpuTotal, cpuIdle, rx, tx, t: now }
+    const d = computeDeltaStats(prev, curr)
+    return {
+        stats: { cpu: d.cpu, netRx: d.netRx, netTx: d.netTx, mem, disk },
+        nextSample: curr,
+    }
+}
+
+/** Parse the custom-metrics section into id/value pairs. Pure. */
+export function parseCustom(
+    output: string,
+    customMetrics: CustomMetric[] = []
+): Array<{ id: string; value: string }> | undefined {
+    if (!customMetrics.length || !output.includes(MARKERS.customStart)) {
+        return undefined
+    }
+    const customPart = output.split(MARKERS.customStart)[1].split(MARKERS.end)[0]
+    const customValues = customPart.split(MARKERS.next).map(s => s.trim())
+    return customMetrics.map((m, index) => ({
+        id: m.id,
+        value: customValues[index] || '-',
+    }))
 }
 
 /**

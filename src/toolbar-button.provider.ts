@@ -12,15 +12,13 @@ export class StatsToolbarButtonProvider extends ToolbarButtonProvider {
             click: () => {
                 if (!this.config.store.plugin) this.config.store.plugin = {};
                 if (!this.config.store.plugin.serverStats) this.config.store.plugin.serverStats = {};
-                
+
                 const current = this.config.store.plugin.serverStats.enabled
                 this.config.store.plugin.serverStats.enabled = !current
+                // config.save() emits config.changed$, which both display
+                // components are subscribed to — they refresh themselves. No need
+                // for global window.* references to the component instances.
                 this.config.save();
-
-                const floatingComponent = (window as any).serverStatsFloating;
-                const bottomBarComponent = (window as any).serverStatsBottomBar;
-                if (floatingComponent) floatingComponent.forceUpdate();
-                if (bottomBarComponent) bottomBarComponent.forceUpdate();
             }
         }]
     }

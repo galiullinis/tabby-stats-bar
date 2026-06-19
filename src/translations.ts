@@ -54,5 +54,10 @@ export const TRANSLATIONS = {
         'I want to submit my own preset': '我想提交我的预设',
         'Debug Logging': '调试日志',
         'Write diagnostic logs to a temp file. Off by default; enable only when troubleshooting.': '将诊断日志写入临时文件。默认关闭，仅在排查问题时启用。',
+        'Refresh Interval': '刷新间隔',
+        'How often stats are fetched (seconds). Only the active tab is polled. Minimum 1s.': '获取统计数据的频率（秒）。仅轮询当前活动标签页。最小 1 秒。',
+        'seconds': '秒',
+        'This preset will run the following shell command on your servers on every refresh:': '此预设会在每次刷新时在你的服务器上运行以下 Shell 命令：',
+        'Add this metric?': '要添加此指标吗？',
     }
 };
