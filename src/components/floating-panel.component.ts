@@ -4,7 +4,7 @@ import { AppService, ConfigService } from 'tabby-core'
 import { BaseChartDirective } from 'ng2-charts'
 import { ChartConfiguration, ChartData, ChartType } from 'chart.js'
 import { StatsService } from '../services/stats.service'
-import { CustomMetric } from '../config'
+import { CustomMetric, POLL_INTERVAL_MS } from '../config'
 import { formatSpeed } from '../services/stats-parser'
 import { resolveFocusedSession, LastActiveSessionTracker } from '../services/session-tracker'
 
@@ -196,7 +196,7 @@ export class ServerStatsFloatingPanelComponent implements OnInit, OnDestroy {
                 this.zone.run(() => {
                     this.checkAndFetch()
                 })
-            }, 3000)
+            }, POLL_INTERVAL_MS)
         })
     }
 

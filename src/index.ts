@@ -9,7 +9,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 
-import { ServerStatsConfigProvider } from './config'
+import { ServerStatsConfigProvider, POLL_INTERVAL_MS } from './config'
 import { TRANSLATIONS } from './translations'
 import { StatsService } from './services/stats.service'
 import { StatsToolbarButtonProvider } from './toolbar-button.provider'
@@ -19,7 +19,7 @@ import { ServerStatsSettingsComponent, ServerStatsSettingsTabProvider } from './
 
 type TabInstance = {
     teardown: () => void
-    timerId: any
+    runPoll: () => Promise<void> | void
     collector: () => Promise<any>
     state: any
     configSub: any
@@ -65,6 +65,10 @@ export default class ServerStatsModule {
     private retryTimer: any = null
     private failed = false
     private scanTimer: any = null
+    private pollTimer: any = null
+    // Cache of the last leaf-tab list, so rebuildTabElementMap() can skip work
+    // when the set of tabs has not actually changed.
+    private cachedLeafTabs: any[] = []
 
     constructor(
         private app: AppService, 
@@ -163,6 +167,51 @@ export default class ServerStatsModule {
         this.safeRun('attachExistingTabs', () => this.attachExistingTabs())
         this.safeRun('observeTabLifecycle', () => this.observeTabLifecycle())
         this.safeRun('startScanTimer', () => this.startScanTimer())
+        this.safeRun('startPollTimer', () => this.startPollTimer())
+    }
+
+    // Single central poll loop for ALL per-tab bars. Only the bar(s) belonging to
+    // the currently active top-level tab are fetched — background tabs (and panes
+    // in non-active split tabs) are skipped entirely. Previously every tab ran its
+    // own 3s interval, so N background SSH tabs meant N channels opened every 3s.
+    private startPollTimer() {
+        if (this.pollTimer) {
+            return
+        }
+        this.pollTimer = window.setInterval(() => {
+            if (this.activeDisplayMode !== 'bottomBar') {
+                return
+            }
+            this.pollActiveTabs()
+        }, POLL_INTERVAL_MS)
+    }
+
+    private pollActiveTabs() {
+        this.attachedTabs.forEach(el => {
+            if (!this.isSshTabActive(el)) {
+                return
+            }
+            const instance = this.tabInstances.get(el)
+            if (instance && typeof instance.runPoll === 'function') {
+                instance.runPoll()
+            }
+        })
+    }
+
+    // An ssh-tab is "active" when it lives inside the currently active top-level
+    // tab. For a split tab this matches every visible pane; for a hidden tab it is
+    // false. Falls back to on-screen visibility when the tab element can't be
+    // resolved, so we never silently stop updating a visible bar.
+    private isSshTabActive(sshTabEl: HTMLElement): boolean {
+        const activeTab = this.app.activeTab
+        if (!activeTab) {
+            return false
+        }
+        const activeEl = this.getTabElement(activeTab)
+        if (activeEl) {
+            return activeEl === sshTabEl || activeEl.contains(sshTabEl) || sshTabEl.contains(activeEl)
+        }
+        return sshTabEl.offsetParent !== null
     }
 
     private ensureGlobalStyle() {
@@ -252,7 +301,8 @@ export default class ServerStatsModule {
         }
         logDebug('[state] attachToSshTab')
 
-        this.rebuildTabElementMap()
+        // Note: attachExistingTabs() rebuilds the tab/element map before iterating,
+        // so we intentionally do NOT rebuild it again per attached tab here.
         sshTabEl.setAttribute('data-ss-attached', '1')
         sshTabEl.classList.add('server-stats-tab')
 
@@ -346,16 +396,15 @@ export default class ServerStatsModule {
             runPoll()
         }
 
+        // Initial fetch on attach (so the bar has data even before it becomes the
+        // active tab). Steady-state polling is driven centrally by startPollTimer()
+        // for the active tab only — no per-tab interval here anymore.
         syncOnConfigChange()
-        const timerId = window.setInterval(runPoll, 3000)
         const configSub = this.config.changed$?.subscribe(() => {
             syncOnConfigChange()
         })
 
         const teardown = () => {
-            if (timerId) {
-                clearInterval(timerId)
-            }
             if (configSub && typeof configSub.unsubscribe === 'function') {
                 configSub.unsubscribe()
             }
@@ -372,7 +421,7 @@ export default class ServerStatsModule {
             sshTabEl.classList.remove('server-stats-tab')
         }
 
-        this.tabInstances.set(sshTabEl, { teardown, timerId, collector, state, configSub })
+        this.tabInstances.set(sshTabEl, { teardown, runPoll, collector, state, configSub })
         this.attachedTabs.add(sshTabEl)
     }
 
@@ -388,8 +437,17 @@ export default class ServerStatsModule {
     }
 
     private rebuildTabElementMap() {
-        this.tabElementMap.clear()
         const tabs = this.getAllLeafTabs()
+        // Skip the rebuild when the tab set is unchanged AND every tab already
+        // resolved to an element. The latter guard ensures we keep retrying for
+        // tabs whose DOM element did not exist yet on a previous pass.
+        const sameSet = tabs.length === this.cachedLeafTabs.length
+            && tabs.every((t, i) => t === this.cachedLeafTabs[i])
+        if (sameSet && this.tabElementMap.size === tabs.length) {
+            return
+        }
+        this.cachedLeafTabs = tabs
+        this.tabElementMap.clear()
         tabs.forEach(tab => {
             const el = this.getTabElement(tab)
             if (el) {
@@ -482,8 +540,19 @@ export default class ServerStatsModule {
             this.rebuildTabElementMap()
             this.attachExistingTabs()
         })
+        // Poll the newly-active tab immediately on switch so its bar refreshes
+        // without waiting for the next central tick.
+        const activeTabChange = (this.app as any).activeTabChange$?.subscribe?.(() => {
+            if (this.activeDisplayMode === 'bottomBar') {
+                this.pollActiveTabs()
+            }
+        }) || (this.app as any).activeTabChange?.subscribe?.(() => {
+            if (this.activeDisplayMode === 'bottomBar') {
+                this.pollActiveTabs()
+            }
+        })
 
-        ;[tabRemoved, tabClosed, tabOpened, tabsChanged].forEach(sub => {
+        ;[tabRemoved, tabClosed, tabOpened, tabsChanged, activeTabChange].forEach(sub => {
             if (sub && typeof sub.unsubscribe === 'function') {
                 this.disposables.push(() => sub.unsubscribe())
             }
@@ -509,6 +578,10 @@ export default class ServerStatsModule {
             clearInterval(this.scanTimer)
             this.scanTimer = null
         }
+        if (this.pollTimer) {
+            clearInterval(this.pollTimer)
+            this.pollTimer = null
+        }
         if (this.retryTimer) {
             clearTimeout(this.retryTimer)
             this.retryTimer = null
@@ -524,5 +597,6 @@ export default class ServerStatsModule {
         this.attachedTabs.clear()
         this.tabInstances = new WeakMap()
         this.tabElementMap.clear()
+        this.cachedLeafTabs = []
     }
 }

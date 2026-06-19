@@ -2,7 +2,7 @@ import { Component, OnInit, OnDestroy, ChangeDetectorRef, NgZone } from '@angula
 import { Subscription } from 'rxjs'
 import { AppService, ConfigService } from 'tabby-core'
 import { StatsService } from '../services/stats.service'
-import { CustomMetric } from '../config'
+import { CustomMetric, POLL_INTERVAL_MS } from '../config'
 import { formatSpeed } from '../services/stats-parser'
 
 @Component({
@@ -249,7 +249,7 @@ export class ServerStatsBottomBarComponent implements OnInit, OnDestroy {
         this.zone.runOutsideAngular(() => {
             this.timerId = window.setInterval(() => {
                 this.zone.run(() => { this.checkAndFetch() })
-            }, 3000)
+            }, POLL_INTERVAL_MS)
         })
     }
 
