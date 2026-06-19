@@ -5,7 +5,7 @@ import { BaseChartDirective } from 'ng2-charts'
 import { ChartConfiguration, ChartData, ChartType } from 'chart.js'
 import { StatsService } from '../services/stats.service'
 import { CustomMetric } from '../config'
-import { formatSpeed } from '../services/stats-parser'
+import { formatSpeed, formatBytes } from '../services/stats-parser'
 import { clampPollIntervalMs, nextBackoffMs } from '../services/poll-timing'
 import { resolveFocusedSession, LastActiveSessionTracker } from '../services/session-tracker'
 
@@ -30,12 +30,17 @@ import { resolveFocusedSession, LastActiveSessionTracker } from '../services/ses
                 <div class="chart-value">{{currentStats.cpu | number:'1.0-0'}}%</div>
             </div>
 
-            <div class="chart-wrapper" 
-                 [style.width.px]="styleConfig.size" 
+            <div class="chart-wrapper"
+                 [style.width.px]="styleConfig.size"
                  [style.height.px]="styleConfig.size">
                 <div class="chart-label">{{ 'RAM' | translate }}</div>
-                <canvas baseChart [data]="memData" [options]="chartOptions" [type]="doughnutChartType"></canvas>
-                <div class="chart-value">{{currentStats.mem | number:'1.0-0'}}%</div>
+                <ng-container *ngIf="ramStyle === 'text'; else ramChart">
+                    <div class="ram-text-value" [style.color]="getMemColor()">{{ getRamText() }}</div>
+                </ng-container>
+                <ng-template #ramChart>
+                    <canvas baseChart [data]="memData" [options]="chartOptions" [type]="doughnutChartType"></canvas>
+                    <div class="chart-value">{{currentStats.mem | number:'1.0-0'}}%</div>
+                </ng-template>
             </div>
 
             <div class="chart-wrapper" 
@@ -128,6 +133,18 @@ import { resolveFocusedSession, LastActiveSessionTracker } from '../services/ses
             text-shadow: 0 1px 2px black;
         }
         .unit { font-size: 0.5em; margin-left: 2px; opacity: 0.8; }
+        .ram-text-value {
+            position: absolute;
+            top: calc(50% + 5cqw); left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 15cqw;
+            font-family: monospace;
+            font-weight: bold;
+            text-align: center;
+            width: 100%;
+            white-space: nowrap;
+            text-shadow: 0 1px 2px black;
+        }
         
         canvas { max-width: calc(100% - 32cqw); max-height: calc(100% - 32cqw); pointer-events: none; }
     `]
@@ -139,6 +156,8 @@ export class ServerStatsFloatingPanelComponent implements OnInit, OnDestroy {
     
     customMetrics: CustomMetric[] = []
     customChartsData: ChartData<'doughnut'>[] = []
+    // RAM display: 'bar' (doughnut + %) or 'text' (used / total). Default 'bar'.
+    public ramStyle: 'bar' | 'text' = 'bar'
 
     private isDragging = false
     private dragOffset = { x: 0, y: 0 }
@@ -231,9 +250,11 @@ export class ServerStatsFloatingPanelComponent implements OnInit, OnDestroy {
             this.styleConfig = { ...this.styleConfig, ...conf.style };
         }
 
+        this.ramStyle = conf.ramStyle === 'text' ? 'text' : 'bar';
+
         // 加载自定义指标
         this.customMetrics = conf.customMetrics || [];
-        this.customChartsData = this.customMetrics.map(m => 
+        this.customChartsData = this.customMetrics.map(m =>
             this.createChartData(m.color || '#00ff00')
         );
 
@@ -243,6 +264,22 @@ export class ServerStatsFloatingPanelComponent implements OnInit, OnDestroy {
 
     formatSpeed(bytes: number): string {
         return formatSpeed(bytes);
+    }
+
+    getMemColor(): string {
+        const mem = this.currentStats.mem;
+        if (mem < 50) return '#2ecc71';
+        if (mem < 80) return '#f1c40f';
+        return '#e74c3c';
+    }
+
+    // "3.2G/8G" when absolute values are known, otherwise falls back to "NN%".
+    getRamText(): string {
+        const total = this.currentStats.memTotal;
+        if (total && total > 0) {
+            return `${formatBytes(this.currentStats.memUsed || 0)}/${formatBytes(total)}`;
+        }
+        return `${Math.round(this.currentStats.mem || 0)}%`;
     }
 
     startDrag(event: MouseEvent) {

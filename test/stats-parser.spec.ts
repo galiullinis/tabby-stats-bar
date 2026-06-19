@@ -5,6 +5,7 @@ import {
     parseCustom,
     buildCustomMetricsFragment,
     formatSpeed,
+    formatBytes,
     MARKERS,
     DeltaSample,
 } from '../src/services/stats-parser'
@@ -14,14 +15,16 @@ const metric = (id: string, command = 'echo 1') => ({
 })
 
 describe('parseBaseSample', () => {
-    it('parses delta-mode line', () => {
-        const out = `${MARKERS.start} D 1000 800 5000 6000 42.5 80 ${MARKERS.end}`
-        expect(parseBaseSample(out)).toEqual({ mode: 'D', nums: [1000, 800, 5000, 6000, 42.5, 80] })
+    it('parses delta-mode line (cpuTotal cpuIdle rx tx mem memUsed memTotal disk)', () => {
+        const out = `${MARKERS.start} D 1000 800 5000 6000 42.5 2147483648 8589934592 80 ${MARKERS.end}`
+        expect(parseBaseSample(out)).toEqual({
+            mode: 'D', nums: [1000, 800, 5000, 6000, 42.5, 2147483648, 8589934592, 80],
+        })
     })
 
-    it('parses values-mode line', () => {
-        const out = `${MARKERS.start} V 12.5 0 0 33.3 50 ${MARKERS.end}`
-        expect(parseBaseSample(out)).toEqual({ mode: 'V', nums: [12.5, 0, 0, 33.3, 50] })
+    it('parses values-mode line (cpu rx tx mem memUsed memTotal disk)', () => {
+        const out = `${MARKERS.start} V 12.5 0 0 33.3 2000 6000 50 ${MARKERS.end}`
+        expect(parseBaseSample(out)).toEqual({ mode: 'V', nums: [12.5, 0, 0, 33.3, 2000, 6000, 50] })
     })
 
     it('returns null when no base line', () => {
@@ -69,27 +72,29 @@ describe('computeDeltaStats', () => {
 })
 
 describe('finalizeSample', () => {
-    it('values mode maps fields directly and keeps no sample', () => {
-        const { stats, nextSample } = finalizeSample({ mode: 'V', nums: [10, 1, 2, 30, 40] }, null, 1000)
-        expect(stats).toEqual({ cpu: 10, netRx: 1, netTx: 2, mem: 30, disk: 40 })
+    it('values mode maps fields directly (incl. memUsed/memTotal) and keeps no sample', () => {
+        const { stats, nextSample } = finalizeSample({ mode: 'V', nums: [10, 1, 2, 30, 2000, 6000, 40] }, null, 1000)
+        expect(stats).toEqual({ cpu: 10, netRx: 1, netTx: 2, mem: 30, disk: 40, memUsed: 2000, memTotal: 6000 })
         expect(nextSample).toBeNull()
     })
 
-    it('delta mode computes against prev and returns the next sample', () => {
+    it('delta mode computes against prev, maps mem bytes, returns next sample', () => {
         const prev: DeltaSample = { cpuTotal: 1000, cpuIdle: 900, rx: 0, tx: 0, t: 1000 }
         const { stats, nextSample } = finalizeSample(
-            { mode: 'D', nums: [1100, 950, 1024, 2048, 55, 70] }, prev, 2000)
+            { mode: 'D', nums: [1100, 950, 1024, 2048, 55, 2147483648, 8589934592, 70] }, prev, 2000)
         expect(stats.cpu).toBe(50)
         expect(stats.netRx).toBe(1024)
         expect(stats.netTx).toBe(2048)
         expect(stats.mem).toBe(55)
         expect(stats.disk).toBe(70)
+        expect(stats.memUsed).toBe(2147483648)
+        expect(stats.memTotal).toBe(8589934592)
         expect(nextSample).toEqual({ cpuTotal: 1100, cpuIdle: 950, rx: 1024, tx: 2048, t: 2000 })
     })
 
     it('delta mode first sample yields zero cpu/net but real mem/disk', () => {
-        const { stats } = finalizeSample({ mode: 'D', nums: [1000, 900, 5, 5, 60, 75] }, null, 1000)
-        expect(stats).toMatchObject({ cpu: 0, netRx: 0, netTx: 0, mem: 60, disk: 75 })
+        const { stats } = finalizeSample({ mode: 'D', nums: [1000, 900, 5, 5, 60, 100, 200, 75] }, null, 1000)
+        expect(stats).toMatchObject({ cpu: 0, netRx: 0, netTx: 0, mem: 60, disk: 75, memUsed: 100, memTotal: 200 })
     })
 })
 
@@ -135,5 +140,18 @@ describe('formatSpeed', () => {
     })
     it('clamps to top unit', () => {
         expect(formatSpeed(1024 ** 5)).toContain('G/s')
+    })
+})
+
+describe('formatBytes', () => {
+    it('handles zero/negative', () => {
+        expect(formatBytes(0)).toBe('0.0')
+        expect(formatBytes(-1)).toBe('0.0')
+    })
+    it('always keeps one decimal for stable width', () => {
+        expect(formatBytes(8 * 1024 ** 3)).toBe('8.0G')
+        expect(formatBytes(512 * 1024 ** 2)).toBe('512.0M')
+        expect(formatBytes(2147483648)).toBe('2.0G')
+        expect(formatBytes(3.2 * 1024 ** 3)).toBe('3.2G')
     })
 })
