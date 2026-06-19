@@ -1,10 +1,11 @@
-import { Component, OnInit, OnDestroy, ChangeDetectorRef, NgZone } from '@angular/core'
+import { Component, OnInit, OnDestroy, ChangeDetectorRef, NgZone, ViewChild, ElementRef } from '@angular/core'
 import { Subscription } from 'rxjs'
 import { AppService, ConfigService } from 'tabby-core'
 import { StatsService } from '../services/stats.service'
 import { CustomMetric } from '../config'
 import { formatSpeed } from '../services/stats-parser'
 import { clampPollIntervalMs } from '../services/poll-timing'
+import { pushSample, clampSparklineBars, cpuColor } from '../services/sparkline'
 
 @Component({
     selector: 'server-stats-bottom-bar',
@@ -20,10 +21,18 @@ import { clampPollIntervalMs } from '../services/poll-timing'
                 <div class="stat-section">
                     <div class="stat-label">{{ 'CPU' | translate }}</div>
                     <div class="stat-content">
-                        <div class="progress-bar-container">
-                            <div class="progress-bar" [style.width.%]="currentStats.cpu" [style.background-color]="getCpuColor()"></div>
-                        </div>
-                        <div class="stat-value">{{currentStats.cpu | number:'1.0-0'}}%</div>
+                        <ng-container *ngIf="cpuStyle === 'sparkline'; else cpuBar">
+                            <canvas #cpuSparkline class="cpu-sparkline"
+                                    [style.width.px]="sparklineBars * sparklinePitch"
+                                    [style.height.px]="sparklineHeight"></canvas>
+                            <div class="stat-value cpu-current" [style.color]="getCpuColor()">{{currentStats.cpu | number:'1.0-0'}}%</div>
+                        </ng-container>
+                        <ng-template #cpuBar>
+                            <div class="progress-bar-container">
+                                <div class="progress-bar" [style.width.%]="currentStats.cpu" [style.background-color]="getCpuColor()"></div>
+                            </div>
+                            <div class="stat-value">{{currentStats.cpu | number:'1.0-0'}}%</div>
+                        </ng-template>
                     </div>
                 </div>
                 <div class="stat-separator"></div>
@@ -110,6 +119,8 @@ import { clampPollIntervalMs } from '../services/poll-timing'
         .stat-content { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
         .progress-bar-container { height: 6px; background-color: rgba(255,255,255,0.1); border-radius: 3px; overflow: hidden; width: 60px; }
         .progress-bar { height: 100%; transition: width 0.3s ease, background-color 0.3s ease; border-radius: 3px; }
+        .cpu-sparkline { display: block; box-sizing: content-box; background-color: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.25); border-radius: 2px; }
+        .cpu-current { min-width: 30px; text-align: right; font-weight: 600; }
         .stat-value { font-family: monospace; font-size: 12px; color: rgba(255,255,255,0.9); line-height: 1.4; white-space: nowrap; text-align: left; }
         .stat-separator { width: 1px; min-height: 16px; background-color: rgba(255,255,255,0.2); margin: 0 2px; align-self: center; flex: 0 0 1px; }
         .net-section { min-width: 120px; margin-left: auto; }
@@ -133,6 +144,15 @@ export class ServerStatsBottomBarComponent implements OnInit, OnDestroy {
     private configSubscriptions: Subscription[] = []
     private boundSession: any = null
     public useExternalController = false
+
+    // CPU display: 'bar' (classic progress bar) or 'sparkline' (MobaXterm-like
+    // history). Configurable; defaults to 'bar' to preserve existing behaviour.
+    public cpuStyle: 'bar' | 'sparkline' = 'bar'
+    @ViewChild('cpuSparkline') private cpuCanvas?: ElementRef<HTMLCanvasElement>
+    public cpuHistory: number[] = []
+    public sparklineBars = 40          // configurable, clamped 20..60
+    public readonly sparklinePitch = 2 // px per bar (1px bar + 1px gap)
+    public readonly sparklineHeight = 16
 
     constructor(
         private statsService: StatsService,
@@ -181,6 +201,7 @@ export class ServerStatsBottomBarComponent implements OnInit, OnDestroy {
             this.loading = false;
         }
         this.cdr.detectChanges();
+        this.drawSparkline();
     }
 
     setExternalLoading(isLoading: boolean) {
@@ -261,7 +282,14 @@ export class ServerStatsBottomBarComponent implements OnInit, OnDestroy {
         }
         // 加载自定义指标配置
         this.customMetrics = conf.customMetrics || [];
+        this.cpuStyle = conf.cpuStyle === 'sparkline' ? 'sparkline' : 'bar';
+        this.sparklineBars = clampSparklineBars(conf.sparklineBars);
+        // Keep history within the (possibly reduced) bar count.
+        if (this.cpuHistory.length > this.sparklineBars) {
+            this.cpuHistory = this.cpuHistory.slice(this.cpuHistory.length - this.sparklineBars);
+        }
         this.cdr.detectChanges();
+        this.drawSparkline();
     }
 
     formatSpeed(bytes: number): string {
@@ -311,6 +339,7 @@ export class ServerStatsBottomBarComponent implements OnInit, OnDestroy {
                     this.currentStats = data;
                 }
                 this.cdr.detectChanges();
+                this.drawSparkline();
             } catch (e) {
                 this.loading = false;
                 this.cdr.detectChanges();
@@ -326,6 +355,46 @@ export class ServerStatsBottomBarComponent implements OnInit, OnDestroy {
 
     updateStats(stats: { cpu: number, mem: number, disk: number, netRx: number, netTx: number }) {
         this.currentStats = stats
+        this.cpuHistory = pushSample(this.cpuHistory, stats.cpu, this.sparklineBars)
+    }
+
+    // Draw the CPU history as thin vertical bars on the canvas. Newest sample is
+    // at the right edge; older samples shift left. Uses devicePixelRatio for
+    // crisp rendering. A single canvas avoids per-bar DOM churn.
+    private drawSparkline() {
+        if (this.cpuStyle !== 'sparkline') {
+            return
+        }
+        const canvas = this.cpuCanvas?.nativeElement
+        if (!canvas) {
+            return
+        }
+        const cssW = this.sparklineBars * this.sparklinePitch
+        const cssH = this.sparklineHeight
+        const dpr = window.devicePixelRatio || 1
+        const pxW = Math.round(cssW * dpr)
+        const pxH = Math.round(cssH * dpr)
+        if (canvas.width !== pxW || canvas.height !== pxH) {
+            canvas.width = pxW
+            canvas.height = pxH
+        }
+        const ctx = canvas.getContext('2d')
+        if (!ctx) {
+            return
+        }
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+        ctx.clearRect(0, 0, cssW, cssH)
+
+        const barW = this.sparklinePitch - 1
+        const n = this.cpuHistory.length
+        for (let i = 0; i < n; i++) {
+            const v = this.cpuHistory[i]
+            const h = Math.max(1, (v / 100) * cssH)
+            // Right-align: the last (newest) sample sits at the right edge.
+            const x = cssW - (n - i) * this.sparklinePitch
+            ctx.fillStyle = cpuColor(v)
+            ctx.fillRect(x, cssH - h, barW, h)
+        }
     }
 
     ngOnDestroy() {

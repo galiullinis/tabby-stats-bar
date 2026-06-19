@@ -3,6 +3,7 @@ import { ConfigService, TranslateService } from 'tabby-core'
 import { SettingsTabProvider } from 'tabby-settings'
 import { CustomMetric } from '../config'
 import { groupedBuiltinPresets } from '../builtin-presets'
+import { clampSparklineBars } from '../services/sparkline'
 
 @Component({
     template: `
@@ -57,6 +58,40 @@ import { groupedBuiltinPresets } from '../builtin-presets'
                     [(ngModel)]="config.store.plugin.serverStats.pollInterval"
                     (ngModelChange)="onIntervalChange($event)">
                 <span class="text-muted ms-2" translate>seconds</span>
+            </div>
+        </div>
+
+        <!-- CPU 显示样式 -->
+        <div class="form-line">
+            <div class="header">
+                <div class="title" translate>CPU Display</div>
+                <div class="description" translate>Classic progress bar or a MobaXterm-like history sparkline (bottom bar only).</div>
+            </div>
+            <div class="btn-group">
+                <input type="radio" class="btn-check" name="cpuStyle" id="cpuStyleBar"
+                    autocomplete="off" value="bar"
+                    [(ngModel)]="config.store.plugin.serverStats.cpuStyle"
+                    (ngModelChange)="save()">
+                <label class="btn btn-secondary" for="cpuStyleBar" translate>Progress Bar</label>
+                <input type="radio" class="btn-check" name="cpuStyle" id="cpuStyleSparkline"
+                    autocomplete="off" value="sparkline"
+                    [(ngModel)]="config.store.plugin.serverStats.cpuStyle"
+                    (ngModelChange)="save()">
+                <label class="btn btn-secondary" for="cpuStyleSparkline" translate>Sparkline</label>
+            </div>
+        </div>
+
+        <!-- Sparkline 列数 -->
+        <div class="form-line" *ngIf="config.store.plugin.serverStats.cpuStyle === 'sparkline'">
+            <div class="header">
+                <div class="title" translate>Sparkline Bars</div>
+                <div class="description" translate>Number of CPU history bars shown (20–60).</div>
+            </div>
+            <div class="d-flex align-items-center">
+                <input type="number" class="form-control" style="width: 90px;" min="20" max="60" step="1"
+                    [(ngModel)]="config.store.plugin.serverStats.sparklineBars"
+                    (ngModelChange)="onSparklineBarsChange($event)">
+                <span class="text-muted ms-2" translate>bars</span>
             </div>
         </div>
 
@@ -247,6 +282,11 @@ export class ServerStatsSettingsComponent {
         if (!Number.isFinite(seconds)) seconds = 5;
         seconds = Math.min(60, Math.max(1, seconds));
         this.config.store.plugin.serverStats.pollInterval = seconds;
+        this.save();
+    }
+
+    onSparklineBarsChange(value: any) {
+        this.config.store.plugin.serverStats.sparklineBars = clampSparklineBars(value);
         this.save();
     }
 
