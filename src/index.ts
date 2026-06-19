@@ -10,6 +10,7 @@ import * as os from 'os'
 import * as path from 'path'
 
 import { ServerStatsConfigProvider } from './config'
+import { clampPollIntervalMs, nextBackoffMs } from './services/poll-timing'
 import { TRANSLATIONS } from './translations'
 import { StatsService } from './services/stats.service'
 import { StatsToolbarButtonProvider } from './toolbar-button.provider'
@@ -19,20 +20,29 @@ import { ServerStatsSettingsComponent, ServerStatsSettingsTabProvider } from './
 
 type TabInstance = {
     teardown: () => void
-    timerId: any
+    // Returns false when a fetch was attempted but produced no data (drives backoff).
+    runPoll: () => Promise<boolean> | boolean
     collector: () => Promise<any>
     state: any
     configSub: any
 }
 
 const LOG_PATH = path.join(os.tmpdir(), 'tabby-server-stats.log')
+
+// Logging is OFF by default. It is enabled only when the user turns on the
+// `debug` flag in the plugin settings. Previously logDebug() did a synchronous
+// fs.appendFileSync() on the renderer thread for every state event and the log
+// grew without bound — both undesirable for a perf-sensitive plugin.
+let debugLoggingEnabled = false
+export const setDebugLogging = (enabled: boolean) => { debugLoggingEnabled = !!enabled }
 const logDebug = (message: string) => {
+    if (!debugLoggingEnabled) {
+        return
+    }
     try {
         fs.appendFileSync(LOG_PATH, `${new Date().toISOString()} ${message}\n`)
     } catch {}
 }
-
-logDebug('[init] module loaded')
 
 @NgModule({
     imports: [CommonModule, FormsModule, NgChartsModule, TabbyCoreModule, NgbModule], 
@@ -52,17 +62,16 @@ export default class ServerStatsModule {
     private tabInstances: WeakMap<HTMLElement, TabInstance> = new WeakMap()
     private attachedTabs = new Set<HTMLElement>()
     private tabElementMap = new Map<HTMLElement, any>()
-    private observer: MutationObserver | null = null
     private disposables: Array<() => void> = []
     private styleNode: HTMLStyleElement | null = null
-    private observerRetry: any = null
+    private retryTimer: any = null
     private failed = false
-    private mutationScheduled = false
-    private pendingAdded = new Set<HTMLElement>()
-    private pendingRemoved = new Set<HTMLElement>()
-    private mutationBurst = 0
-    private mutationBurstTimer: any = null
     private scanTimer: any = null
+    private pollTimer: any = null
+    private pollBackoffMs = 0
+    // Cache of the last leaf-tab list, so rebuildTabElementMap() can skip work
+    // when the set of tabs has not actually changed.
+    private cachedLeafTabs: any[] = []
 
     constructor(
         private app: AppService, 
@@ -73,8 +82,10 @@ export default class ServerStatsModule {
         private statsService: StatsService,
         translate: TranslateService
     ) {
+        this.syncDebugLogging()
         logDebug('[init] constructor start')
         this.config.ready$.subscribe(() => {
+            this.syncDebugLogging()
             setTimeout(() => {
                 this.safeRun('translations', () => {
                     for (const [lang, trans] of Object.entries(TRANSLATIONS)) {
@@ -92,10 +103,15 @@ export default class ServerStatsModule {
         })
 
         this.config.changed$.subscribe(() => {
+            this.syncDebugLogging()
             logDebug('[event] config.changed')
             this.safeRun('applyDisplayMode:changed', () => this.applyDisplayMode(this.getDisplayMode()))
         })
         logDebug('[init] constructor end')
+    }
+
+    private syncDebugLogging() {
+        setDebugLogging(!!this.config.store?.plugin?.serverStats?.debug)
     }
 
     private getDisplayMode() {
@@ -153,8 +169,82 @@ export default class ServerStatsModule {
         this.safeRun('rebuildTabElementMap', () => this.rebuildTabElementMap())
         this.safeRun('attachExistingTabs', () => this.attachExistingTabs())
         this.safeRun('observeTabLifecycle', () => this.observeTabLifecycle())
-        this.safeRun('startMutationObserver', () => this.startMutationObserver())
         this.safeRun('startScanTimer', () => this.startScanTimer())
+        this.safeRun('startPollTimer', () => this.startPollTimer())
+    }
+
+    private getPollIntervalMs(): number {
+        return clampPollIntervalMs(this.config.store?.plugin?.serverStats?.pollInterval)
+    }
+
+    // Single central poll loop for ALL per-tab bars. Only the bar(s) belonging to
+    // the currently active top-level tab are fetched — background tabs (and panes
+    // in non-active split tabs) are skipped entirely.
+    //
+    // It is a SELF-RESCHEDULING loop (setTimeout, not setInterval): the next poll
+    // is scheduled only AFTER the current one settles, which structurally prevents
+    // overlap even at very short intervals. On failure it backs off exponentially.
+    private startPollTimer() {
+        if (this.pollTimer) {
+            return
+        }
+        this.scheduleNextPoll(0)
+    }
+
+    private scheduleNextPoll(delay: number) {
+        this.pollTimer = window.setTimeout(async () => {
+            this.pollTimer = null
+            if (this.activeDisplayMode !== 'bottomBar') {
+                // Stay alive but idle; re-check at the normal cadence.
+                this.scheduleNextPoll(this.getPollIntervalMs())
+                return
+            }
+            let ok = true
+            try {
+                ok = await this.pollActiveTabsOnce()
+            } catch {
+                ok = false
+            }
+            this.pollBackoffMs = nextBackoffMs(this.pollBackoffMs, !ok)
+            this.scheduleNextPoll(this.getPollIntervalMs() + this.pollBackoffMs)
+        }, delay)
+    }
+
+    // Polls every active bar once, awaiting them all. Returns false only when a
+    // poll was attempted and produced no data (error/timeout) — that drives the
+    // backoff. "Nothing to poll" / "intentionally hidden" count as success.
+    private async pollActiveTabsOnce(): Promise<boolean> {
+        const polls: Array<Promise<boolean>> = []
+        this.attachedTabs.forEach(el => {
+            if (!this.isSshTabActive(el)) {
+                return
+            }
+            const instance = this.tabInstances.get(el)
+            if (instance && typeof instance.runPoll === 'function') {
+                polls.push(Promise.resolve(instance.runPoll()).then(r => r !== false).catch(() => false))
+            }
+        })
+        if (!polls.length) {
+            return true
+        }
+        const results = await Promise.all(polls)
+        return results.some(r => r)
+    }
+
+    // An ssh-tab is "active" when it lives inside the currently active top-level
+    // tab. For a split tab this matches every visible pane; for a hidden tab it is
+    // false. Falls back to on-screen visibility when the tab element can't be
+    // resolved, so we never silently stop updating a visible bar.
+    private isSshTabActive(sshTabEl: HTMLElement): boolean {
+        const activeTab = this.app.activeTab
+        if (!activeTab) {
+            return false
+        }
+        const activeEl = this.getTabElement(activeTab)
+        if (activeEl) {
+            return activeEl === sshTabEl || activeEl.contains(sshTabEl) || sshTabEl.contains(activeEl)
+        }
+        return sshTabEl.offsetParent !== null
     }
 
     private ensureGlobalStyle() {
@@ -162,7 +252,7 @@ export default class ServerStatsModule {
             return
         }
         if (!document.head) {
-            this.scheduleObserverRetry()
+            this.scheduleRetry()
             return
         }
         logDebug('[state] ensureGlobalStyle')
@@ -193,7 +283,7 @@ export default class ServerStatsModule {
         const content = document.querySelector('app-root > div > .content')
         if (!content) {
             logDebug('[state] attachExistingTabs: no content')
-            this.scheduleObserverRetry()
+            this.scheduleRetry()
             return
         }
         this.rebuildTabElementMap()
@@ -202,128 +292,25 @@ export default class ServerStatsModule {
         candidates.forEach(el => this.attachToSshTab(el as HTMLElement))
     }
 
-    private startMutationObserver() {
-        const target = this.getObserverTarget()
-        if (!target) {
-            logDebug('[state] startMutationObserver: no target')
-            this.scheduleObserverRetry()
+    // The plugin used to run a global MutationObserver with `subtree: true` over
+    // the whole `.content` area to detect new ssh-tab elements. That made it react
+    // to xterm.js's constant in-terminal DOM churn — a main-thread CPU hot path that
+    // could freeze the entire UI. Tab discovery is now driven exclusively by Tabby's
+    // own lifecycle observables (tabOpened$ / tabsChanged$ / tabRemoved$ / tabClosed$)
+    // plus a light periodic scan timer (startScanTimer). No DOM mutation watching.
+    private scheduleRetry() {
+        if (this.retryTimer) {
             return
         }
-        logDebug('[state] startMutationObserver: ok')
-        if (this.observer) {
-            this.observer.disconnect()
-        }
-        this.observer = new MutationObserver(mutations => {
-            let relevant = 0
-            mutations.forEach(mutation => {
-                // Ignore DOM churn that happens *inside* an existing terminal tab.
-                // xterm.js continuously rewrites its own DOM (rendered output and the
-                // blinking cursor); reacting to that turned this observer into a CPU
-                // hot path (100% main-thread JS). New ssh-tab elements are inserted at
-                // the tab-host level, whose target is not inside an ssh-tab, so they
-                // are still captured.
-                const target = mutation.target as HTMLElement
-                if (target && typeof target.closest === 'function' && target.closest('ssh-tab')) {
-                    return
-                }
-                mutation.addedNodes.forEach(node => this.queueMutationNode(node, true))
-                mutation.removedNodes.forEach(node => this.queueMutationNode(node, false))
-                relevant++
-            })
-            // Only count tab-level mutations toward the burst breaker, so ordinary
-            // terminal output (filtered out above) never trips it.
-            if (relevant > 0) {
-                this.trackMutationBurst(relevant)
-                this.flushMutationQueue()
-            }
-        })
-        this.observer.observe(target, { childList: true, subtree: true })
-    }
-
-    private queueMutationNode(node: Node, added: boolean) {
-        if (!(node instanceof HTMLElement)) {
-            return
-        }
-        if (added) {
-            this.pendingAdded.add(node)
-        } else {
-            this.pendingRemoved.add(node)
-        }
-    }
-
-    private flushMutationQueue() {
-        if (this.mutationScheduled) {
-            return
-        }
-        this.mutationScheduled = true
-        window.setTimeout(() => {
-            this.mutationScheduled = false
-            this.pendingAdded.forEach(node => this.scanNodeForTabs(node))
-            this.pendingRemoved.forEach(node => this.handleRemovedNode(node))
-            this.pendingAdded.clear()
-            this.pendingRemoved.clear()
-        }, 0)
-    }
-
-    private getObserverTarget(): HTMLElement | null {
-        return (document.querySelector('app-root > div > .content') as HTMLElement) || null
-    }
-
-    private trackMutationBurst(count: number) {
-        this.mutationBurst += count
-        if (!this.mutationBurstTimer) {
-            this.mutationBurstTimer = window.setTimeout(() => {
-                this.mutationBurst = 0
-                this.mutationBurstTimer = null
-            }, 1000)
-        }
-        if (this.mutationBurst > 2000 && this.observer) {
-            logDebug('[state] mutation burst detected, disabling observer')
-            this.observer.disconnect()
-            this.observer = null
-        }
-    }
-
-    private scheduleObserverRetry() {
-        if (this.observerRetry) {
-            return
-        }
-        logDebug('[state] scheduleObserverRetry')
-        this.observerRetry = window.setTimeout(() => {
-            this.observerRetry = null
+        logDebug('[state] scheduleRetry')
+        this.retryTimer = window.setTimeout(() => {
+            this.retryTimer = null
             if (this.activeDisplayMode === 'bottomBar') {
-                logDebug('[state] observerRetry tick')
+                logDebug('[state] retry tick')
                 this.safeRun('ensureGlobalStyle:retry', () => this.ensureGlobalStyle())
                 this.safeRun('attachExistingTabs:retry', () => this.attachExistingTabs())
-                this.safeRun('startMutationObserver:retry', () => this.startMutationObserver())
             }
         }, 250)
-    }
-
-    private scanNodeForTabs(node: Node) {
-        if (!(node instanceof HTMLElement)) {
-            return
-        }
-        if (node.tagName && node.tagName.toLowerCase() === 'ssh-tab') {
-            this.attachToSshTab(node)
-            return
-        }
-        const inner = node.querySelectorAll('ssh-tab')
-        inner.forEach(el => this.attachToSshTab(el as HTMLElement))
-    }
-
-    private handleRemovedNode(node: Node) {
-        if (!(node instanceof HTMLElement)) {
-            return
-        }
-        if (node.tagName && node.tagName.toLowerCase() === 'ssh-tab') {
-            if (this.tabInstances.has(node)) {
-                this.detachFromTab(node)
-            }
-            return
-        }
-        const inner = node.querySelectorAll('ssh-tab')
-        inner.forEach(el => this.detachFromTab(el as HTMLElement))
     }
 
     private startScanTimer() {
@@ -347,7 +334,8 @@ export default class ServerStatsModule {
         }
         logDebug('[state] attachToSshTab')
 
-        this.rebuildTabElementMap()
+        // Note: attachExistingTabs() rebuilds the tab/element map before iterating,
+        // so we intentionally do NOT rebuild it again per attached tab here.
         sshTabEl.setAttribute('data-ss-attached', '1')
         sshTabEl.classList.add('server-stats-tab')
 
@@ -391,39 +379,35 @@ export default class ServerStatsModule {
             return { data, session: activeSession, supported: true }
         }
 
-        const runPoll = async () => {
+        // Returns true on success or when intentionally hidden; false only when a
+        // fetch was attempted but yielded no data (so the scheduler can back off).
+        const runPoll = async (): Promise<boolean> => {
             const isEnabled = this.config.store.plugin?.serverStats?.enabled
             const displayMode = this.getDisplayMode()
             if (!isEnabled || displayMode !== 'bottomBar') {
                 if ((barRef.instance as any).hideExternal) {
                     (barRef.instance as any).hideExternal()
                 }
-                return
+                return true
             }
             const result = await collector()
-            if (!result) {
-                return
-            }
-            if (!result.session) {
+            if (!result || !result.session || !result.supported) {
                 if ((barRef.instance as any).hideExternal) {
                     (barRef.instance as any).hideExternal()
                 }
-                return
-            }
-            if (!result.supported) {
-                if ((barRef.instance as any).hideExternal) {
-                    (barRef.instance as any).hideExternal()
-                }
-                return
+                return true
             }
             if (result.data) {
                 state.last = result.data
                 if ((barRef.instance as any).renderExternalStats) {
                     (barRef.instance as any).renderExternalStats(result.data)
                 }
-            } else if ((barRef.instance as any).setExternalLoading) {
+                return true
+            }
+            if ((barRef.instance as any).setExternalLoading) {
                 (barRef.instance as any).setExternalLoading(false)
             }
+            return false
         }
 
         const syncOnConfigChange = () => {
@@ -441,16 +425,15 @@ export default class ServerStatsModule {
             runPoll()
         }
 
+        // Initial fetch on attach (so the bar has data even before it becomes the
+        // active tab). Steady-state polling is driven centrally by startPollTimer()
+        // for the active tab only — no per-tab interval here anymore.
         syncOnConfigChange()
-        const timerId = window.setInterval(runPoll, 3000)
         const configSub = this.config.changed$?.subscribe(() => {
             syncOnConfigChange()
         })
 
         const teardown = () => {
-            if (timerId) {
-                clearInterval(timerId)
-            }
             if (configSub && typeof configSub.unsubscribe === 'function') {
                 configSub.unsubscribe()
             }
@@ -467,7 +450,7 @@ export default class ServerStatsModule {
             sshTabEl.classList.remove('server-stats-tab')
         }
 
-        this.tabInstances.set(sshTabEl, { teardown, timerId, collector, state, configSub })
+        this.tabInstances.set(sshTabEl, { teardown, runPoll, collector, state, configSub })
         this.attachedTabs.add(sshTabEl)
     }
 
@@ -483,8 +466,17 @@ export default class ServerStatsModule {
     }
 
     private rebuildTabElementMap() {
-        this.tabElementMap.clear()
         const tabs = this.getAllLeafTabs()
+        // Skip the rebuild when the tab set is unchanged AND every tab already
+        // resolved to an element. The latter guard ensures we keep retrying for
+        // tabs whose DOM element did not exist yet on a previous pass.
+        const sameSet = tabs.length === this.cachedLeafTabs.length
+            && tabs.every((t, i) => t === this.cachedLeafTabs[i])
+        if (sameSet && this.tabElementMap.size === tabs.length) {
+            return
+        }
+        this.cachedLeafTabs = tabs
+        this.tabElementMap.clear()
         tabs.forEach(tab => {
             const el = this.getTabElement(tab)
             if (el) {
@@ -577,8 +569,18 @@ export default class ServerStatsModule {
             this.rebuildTabElementMap()
             this.attachExistingTabs()
         })
+        // Poll the newly-active tab immediately on switch so its bar refreshes
+        // without waiting for the next central tick.
+        const onActiveTabChange = () => {
+            if (this.activeDisplayMode === 'bottomBar') {
+                // Fire-and-forget immediate refresh of the newly-active tab.
+                this.pollActiveTabsOnce()
+            }
+        }
+        const activeTabChange = (this.app as any).activeTabChange$?.subscribe?.(onActiveTabChange)
+            || (this.app as any).activeTabChange?.subscribe?.(onActiveTabChange)
 
-        ;[tabRemoved, tabClosed, tabOpened, tabsChanged].forEach(sub => {
+        ;[tabRemoved, tabClosed, tabOpened, tabsChanged, activeTabChange].forEach(sub => {
             if (sub && typeof sub.unsubscribe === 'function') {
                 this.disposables.push(() => sub.unsubscribe())
             }
@@ -600,13 +602,18 @@ export default class ServerStatsModule {
     }
 
     private teardownAllTabs() {
-        if (this.observer) {
-            this.observer.disconnect()
-            this.observer = null
-        }
         if (this.scanTimer) {
             clearInterval(this.scanTimer)
             this.scanTimer = null
+        }
+        if (this.pollTimer) {
+            clearTimeout(this.pollTimer)
+            this.pollTimer = null
+        }
+        this.pollBackoffMs = 0
+        if (this.retryTimer) {
+            clearTimeout(this.retryTimer)
+            this.retryTimer = null
         }
         this.disposables.forEach(fn => fn())
         this.disposables = []
@@ -619,5 +626,6 @@ export default class ServerStatsModule {
         this.attachedTabs.clear()
         this.tabInstances = new WeakMap()
         this.tabElementMap.clear()
+        this.cachedLeafTabs = []
     }
 }

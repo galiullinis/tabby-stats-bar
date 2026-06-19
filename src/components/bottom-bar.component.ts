@@ -3,6 +3,8 @@ import { Subscription } from 'rxjs'
 import { AppService, ConfigService } from 'tabby-core'
 import { StatsService } from '../services/stats.service'
 import { CustomMetric } from '../config'
+import { formatSpeed } from '../services/stats-parser'
+import { clampPollIntervalMs } from '../services/poll-timing'
 
 @Component({
     selector: 'server-stats-bottom-bar',
@@ -248,7 +250,7 @@ export class ServerStatsBottomBarComponent implements OnInit, OnDestroy {
         this.zone.runOutsideAngular(() => {
             this.timerId = window.setInterval(() => {
                 this.zone.run(() => { this.checkAndFetch() })
-            }, 3000)
+            }, clampPollIntervalMs(this.config.store?.plugin?.serverStats?.pollInterval))
         })
     }
 
@@ -263,14 +265,8 @@ export class ServerStatsBottomBarComponent implements OnInit, OnDestroy {
     }
 
     formatSpeed(bytes: number): string {
-        if (bytes === 0) return '0 B/s';
-        const k = 1024;
-        const sizes = ['B/s', 'K/s', 'M/s', 'G/s'];
-        const i = Math.floor(Math.log(bytes) / Math.log(k));
-        return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+        return formatSpeed(bytes);
     }
-
-    forceUpdate() { this.checkAndFetch() }
 
     async checkAndFetch() {
         if (this.useExternalController) {
