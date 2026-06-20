@@ -30,6 +30,13 @@ import { resolveFocusedSession, LastActiveSessionTracker } from '../services/ses
                 <div class="chart-value">{{currentStats.cpu | number:'1.0-0'}}%</div>
             </div>
 
+            <div class="chart-wrapper" *ngIf="showIoWait"
+                 [style.width.px]="styleConfig.size"
+                 [style.height.px]="styleConfig.size">
+                <div class="chart-label">{{ 'IOW' | translate }}</div>
+                <div class="ram-text-value" [style.color]="getIoColor()">{{currentStats.iowait | number:'1.0-0'}}%</div>
+            </div>
+
             <div class="chart-wrapper"
                  [style.width.px]="styleConfig.size"
                  [style.height.px]="styleConfig.size">
@@ -152,12 +159,14 @@ import { resolveFocusedSession, LastActiveSessionTracker } from '../services/ses
 export class ServerStatsFloatingPanelComponent implements OnInit, OnDestroy {
     @ViewChildren(BaseChartDirective) charts: QueryList<BaseChartDirective> | undefined
     visible = false
-    currentStats: any = { cpu: 0, mem: 0, disk: 0, netRx: 0, netTx: 0, custom: [] }
-    
+    currentStats: any = { cpu: 0, iowait: 0, mem: 0, disk: 0, netRx: 0, netTx: 0, custom: [] }
+
     customMetrics: CustomMetric[] = []
     customChartsData: ChartData<'doughnut'>[] = []
     // RAM display: 'bar' (doughnut + %) or 'text' (used / total). Default 'bar'.
     public ramStyle: 'bar' | 'text' = 'bar'
+    // First-class I/O wait %, computed in the core from /proc/stat delta. Optional.
+    public showIoWait = false
 
     private isDragging = false
     private dragOffset = { x: 0, y: 0 }
@@ -251,6 +260,7 @@ export class ServerStatsFloatingPanelComponent implements OnInit, OnDestroy {
         }
 
         this.ramStyle = conf.ramStyle === 'text' ? 'text' : 'bar';
+        this.showIoWait = !!conf.showIoWait;
 
         // 加载自定义指标
         this.customMetrics = conf.customMetrics || [];
@@ -270,6 +280,13 @@ export class ServerStatsFloatingPanelComponent implements OnInit, OnDestroy {
         const mem = this.currentStats.mem;
         if (mem < 50) return '#2ecc71';
         if (mem < 80) return '#f1c40f';
+        return '#e74c3c';
+    }
+
+    getIoColor(): string {
+        const v = this.currentStats.iowait;
+        if (v < 10) return '#2ecc71';
+        if (v < 30) return '#f1c40f';
         return '#e74c3c';
     }
 

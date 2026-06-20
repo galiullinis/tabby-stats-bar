@@ -115,6 +115,39 @@ import { clampSparklineBars } from '../services/sparkline'
             </div>
         </div>
 
+        <!-- Disk 显示样式 -->
+        <div class="form-line">
+            <div class="header">
+                <div class="title" translate>Disk Display</div>
+                <div class="description" translate>Root only, or per mount point (shows / plus the fullest local mounts; full list on hover). Bottom bar only.</div>
+            </div>
+            <div class="btn-group">
+                <input type="radio" class="btn-check" name="diskStyle" id="diskStyleSingle"
+                    autocomplete="off" value="single"
+                    [(ngModel)]="config.store.plugin.serverStats.diskStyle"
+                    (ngModelChange)="save()">
+                <label class="btn btn-secondary" for="diskStyleSingle" translate>Root (/)</label>
+                <input type="radio" class="btn-check" name="diskStyle" id="diskStyleMounts"
+                    autocomplete="off" value="mounts"
+                    [(ngModel)]="config.store.plugin.serverStats.diskStyle"
+                    (ngModelChange)="save()">
+                <label class="btn btn-secondary" for="diskStyleMounts" translate>Mount Points</label>
+            </div>
+        </div>
+
+        <!-- I/O Wait 开关 -->
+        <div class="form-line">
+            <div class="header">
+                <div class="title" translate>Show I/O Wait</div>
+                <div class="description" translate>CPU time spent waiting on disk I/O (Linux). Computed from /proc/stat — no extra command.</div>
+            </div>
+            <div class="form-check form-switch">
+                <input type="checkbox" class="form-check-input"
+                    [(ngModel)]="config.store.plugin.serverStats.showIoWait"
+                    (ngModelChange)="save()">
+            </div>
+        </div>
+
         <!-- 调试日志开关 -->
         <div class="form-line">
             <div class="header">
