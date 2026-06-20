@@ -8,6 +8,8 @@ import {
     finalizeSample,
     parseCustom,
     buildCustomMetricsFragment,
+    buildDiskMountsFragment,
+    parseDiskMounts,
     DeltaSample,
 } from './stats-parser'
 import { execSshCommand } from './ssh-exec'
@@ -23,9 +25,9 @@ export class StatsService {
     //   (e.g. 1s) polling viable — each remote call returns immediately.
     // macOS (mode "V" = values): emits already-computed values (no cheap /proc).
     //
-    // Linux fields after "D": cpuTotal cpuIdle rxBytes txBytes mem% memUsedBytes memTotalBytes disk%
-    // macOS fields after "V": cpu% rx tx mem% memUsedBytes memTotalBytes disk%
-    private baseStatsCommand = `export LC_ALL=C; PATH=$PATH:/usr/bin:/bin:/usr/sbin:/sbin; OS=$(uname -s 2>/dev/null || echo Linux); if [ "$OS" = "Darwin" ]; then set -- $(ps -A -o %cpu= -o %mem= 2>/dev/null | awk '{c+=$1; m+=$2} END {printf "%.1f %.1f", c+0, m+0}'); cpu=$1; mem=$2; memtotal=$(sysctl -n hw.memsize 2>/dev/null || echo 0); memused=$(awk -v p="$mem" -v t="$memtotal" 'BEGIN{ if (t>0) printf "%d", t*p/100; else print 0 }'); disk=$(df -P / 2>/dev/null | awk 'NR==2{gsub(/%/,"",$5); print $5}'); if [ -z "$cpu" ]; then cpu=0; fi; if [ -z "$mem" ]; then mem=0; fi; if [ -z "$memtotal" ]; then memtotal=0; fi; if [ -z "$memused" ]; then memused=0; fi; if [ -z "$disk" ]; then disk=0; fi; echo "TABBY-STATS-START V $cpu 0 0 $mem $memused $memtotal $disk"; else cpu=$(awk '/^cpu /{print $2+$3+$4+$5+$6+$7+$8, $5; exit}' /proc/stat 2>/dev/null); net=$(awk 'NR>2 && $1!="lo:"{rx+=$2; tx+=$10} END {print rx+0, tx+0}' /proc/net/dev 2>/dev/null); mem=$(awk '/^MemTotal/{t=$2} /^MemAvailable/{a=$2} END {u=t-a; if (t<=0){print "0 0 0"} else {printf "%.1f %d %d", u/t*100, u*1024, t*1024}}' /proc/meminfo 2>/dev/null); disk=$(df -P / 2>/dev/null | awk 'NR==2{gsub(/%/,"",$5); print $5}'); if [ -z "$cpu" ]; then cpu="0 0"; fi; if [ -z "$net" ]; then net="0 0"; fi; if [ -z "$mem" ]; then mem="0 0 0"; fi; if [ -z "$disk" ]; then disk=0; fi; echo "TABBY-STATS-START D $cpu $net $mem $disk"; fi`
+    // Linux fields after "D": cpuTotal cpuIdle cpuIowait rxBytes txBytes mem% memUsedBytes memTotalBytes disk%
+    // macOS fields after "V": cpu% iowait% rx tx mem% memUsedBytes memTotalBytes disk%  (iowait=0; no cheap source)
+    private baseStatsCommand = `export LC_ALL=C; PATH=$PATH:/usr/bin:/bin:/usr/sbin:/sbin; OS=$(uname -s 2>/dev/null || echo Linux); if [ "$OS" = "Darwin" ]; then set -- $(ps -A -o %cpu= -o %mem= 2>/dev/null | awk '{c+=$1; m+=$2} END {printf "%.1f %.1f", c+0, m+0}'); cpu=$1; mem=$2; memtotal=$(sysctl -n hw.memsize 2>/dev/null || echo 0); memused=$(awk -v p="$mem" -v t="$memtotal" 'BEGIN{ if (t>0) printf "%d", t*p/100; else print 0 }'); disk=$(df -P / 2>/dev/null | awk 'NR==2{gsub(/%/,"",$5); print $5}'); if [ -z "$cpu" ]; then cpu=0; fi; if [ -z "$mem" ]; then mem=0; fi; if [ -z "$memtotal" ]; then memtotal=0; fi; if [ -z "$memused" ]; then memused=0; fi; if [ -z "$disk" ]; then disk=0; fi; echo "TABBY-STATS-START V $cpu 0 0 0 $mem $memused $memtotal $disk"; else cpu=$(awk '/^cpu /{print $2+$3+$4+$5+$6+$7+$8, $5, $6; exit}' /proc/stat 2>/dev/null); net=$(awk 'NR>2 && $1!="lo:"{rx+=$2; tx+=$10} END {print rx+0, tx+0}' /proc/net/dev 2>/dev/null); mem=$(awk '/^MemTotal/{t=$2} /^MemAvailable/{a=$2} END {u=t-a; if (t<=0){print "0 0 0"} else {printf "%.1f %d %d", u/t*100, u*1024, t*1024}}' /proc/meminfo 2>/dev/null); disk=$(df -P / 2>/dev/null | awk 'NR==2{gsub(/%/,"",$5); print $5}'); if [ -z "$cpu" ]; then cpu="0 0 0"; fi; if [ -z "$net" ]; then net="0 0"; fi; if [ -z "$mem" ]; then mem="0 0 0"; fi; if [ -z "$disk" ]; then disk=0; fi; echo "TABBY-STATS-START D $cpu $net $mem $disk"; fi`
 
     // Per-session guard (no overlapping fetch for the same session) and previous
     // raw sample (for client-side delta computation).
@@ -64,8 +66,12 @@ export class StatsService {
             }
 
             const customMetrics: CustomMetric[] = this.config.store.plugin.serverStats.customMetrics || [];
+            const diskMounts = this.config.store.plugin.serverStats.diskStyle === 'mounts';
 
             let finalCommand = this.baseStatsCommand;
+            if (diskMounts) {
+                finalCommand += buildDiskMountsFragment();
+            }
             finalCommand += buildCustomMetricsFragment(customMetrics);
             finalCommand += `; echo " ${MARKERS.end}"`;
             finalCommand = finalCommand.replace(/\n/g, ' ');
@@ -94,6 +100,12 @@ export class StatsService {
             const custom = parseCustom(output || '', customMetrics);
             if (custom) {
                 (stats as any).custom = custom;
+            }
+            if (diskMounts) {
+                const mounts = parseDiskMounts(output || '');
+                if (mounts) {
+                    (stats as any).mounts = mounts;
+                }
             }
 
             this.fetchGuards.delete(session);

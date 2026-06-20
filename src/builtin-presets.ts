@@ -72,22 +72,9 @@ export const BUILTIN_PRESETS: BuiltinPreset[] = [
         color: '#0984e3',
         suffix: '',
     },
-    {
-        category: 'System',
-        label: 'I/O Wait',
-        command: `iostat -c 1 1 | awk 'NR==4{print $4}'`,
-        type: 'text',
-        color: '#fdcb6e',
-        suffix: '%',
-    },
-    {
-        category: 'System',
-        label: 'Failed Units',
-        command: `systemctl --failed --no-legend | wc -l`,
-        type: 'text',
-        color: '#ff7675',
-        suffix: '',
-    },
+    // NOTE: I/O Wait is NOT a preset — it is a first-class metric computed in the
+    // core from the /proc/stat delta (no extra command, no sleep). Enable it via
+    // Settings → "Show I/O Wait".
     // ── Network ─────────────────────────────────────────────────────────────
     {
         category: 'Network',
@@ -96,25 +83,6 @@ export const BUILTIN_PRESETS: BuiltinPreset[] = [
         type: 'text',
         color: '#00ff00',
         suffix: '',
-    },
-    // ── GPU ─────────────────────────────────────────────────────────────────
-    {
-        category: 'GPU',
-        label: 'GPU',
-        command: `nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null || echo 0`,
-        type: 'progress',
-        color: '#76b900',
-        maxValue: 100,
-        suffix: '%',
-    },
-    // ── Containers ────────────────────────────────────────────────────────────
-    {
-        category: 'Containers',
-        label: 'Docker',
-        command: `docker ps -q 2>/dev/null | wc -l`,
-        type: 'text',
-        color: '#0db7ed',
-        suffix: ' run',
     },
 ]
 

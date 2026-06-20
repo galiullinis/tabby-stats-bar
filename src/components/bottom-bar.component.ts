@@ -3,7 +3,7 @@ import { Subscription } from 'rxjs'
 import { AppService, ConfigService } from 'tabby-core'
 import { StatsService } from '../services/stats.service'
 import { CustomMetric } from '../config'
-import { formatSpeed, formatBytes } from '../services/stats-parser'
+import { formatSpeed, formatBytes, selectCompactMounts, formatMountsTooltip, DiskMount } from '../services/stats-parser'
 import { clampPollIntervalMs } from '../services/poll-timing'
 import { pushSample, clampSparklineBars, cpuColor } from '../services/sparkline'
 
@@ -37,6 +37,16 @@ import { pushSample, clampSparklineBars, cpuColor } from '../services/sparkline'
                 </div>
                 <div class="stat-separator"></div>
 
+                <ng-container *ngIf="showIoWait">
+                    <div class="stat-section">
+                        <div class="stat-label" title="{{ 'CPU time waiting on disk I/O' | translate }}">{{ 'IOW' | translate }}</div>
+                        <div class="stat-content">
+                            <div class="stat-value" [style.color]="ioColorFor(currentStats.iowait)">{{ currentStats.iowait | number:'1.0-0' }}%</div>
+                        </div>
+                    </div>
+                    <div class="stat-separator"></div>
+                </ng-container>
+
                 <div class="stat-section">
                     <div class="stat-label">{{ 'RAM' | translate }}</div>
                     <div class="stat-content">
@@ -56,10 +66,21 @@ import { pushSample, clampSparklineBars, cpuColor } from '../services/sparkline'
                 <div class="stat-section">
                     <div class="stat-label">{{ 'DISK' | translate }}</div>
                     <div class="stat-content">
-                        <div class="progress-bar-container">
-                            <div class="progress-bar" [style.width.%]="currentStats.disk" [style.background-color]="getDiskColor()"></div>
-                        </div>
-                        <div class="stat-value">{{currentStats.disk | number:'1.0-0'}}%</div>
+                        <ng-container *ngIf="diskStyle === 'mounts' && compactMounts.length; else diskBar">
+                            <div class="disk-mounts" [title]="mountsTooltip">
+                                <ng-container *ngFor="let mnt of compactMounts; let i = index">
+                                    <span class="disk-mount-sep" *ngIf="i > 0"></span>
+                                    <span class="disk-mount-name">{{ mnt.mount }}</span>
+                                    <span class="disk-mount-pct" [style.color]="diskColorFor(mnt.usagePercent)">{{ mnt.usagePercent }}%</span>
+                                </ng-container>
+                            </div>
+                        </ng-container>
+                        <ng-template #diskBar>
+                            <div class="progress-bar-container">
+                                <div class="progress-bar" [style.width.%]="currentStats.disk" [style.background-color]="getDiskColor()"></div>
+                            </div>
+                            <div class="stat-value">{{currentStats.disk | number:'1.0-0'}}%</div>
+                        </ng-template>
                     </div>
                 </div>
 
@@ -126,6 +147,10 @@ import { pushSample, clampSparklineBars, cpuColor } from '../services/sparkline'
         .progress-bar { height: 100%; transition: width 0.3s ease, background-color 0.3s ease; border-radius: 3px; }
         .cpu-sparkline { display: block; box-sizing: content-box; background-color: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.25); border-radius: 2px; }
         .cpu-current { min-width: 30px; text-align: right; font-weight: 600; }
+        .disk-mounts { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; font-family: monospace; font-size: 12px; line-height: 1.4; }
+        .disk-mount-sep { width: 1px; height: 11px; background-color: rgba(255,255,255,0.25); display: inline-block; }
+        .disk-mount-name { color: rgba(255,255,255,0.65); }
+        .disk-mount-pct { font-weight: 600; margin-left: -2px; }
         .stat-value { font-family: monospace; font-size: 12px; color: rgba(255,255,255,0.9); line-height: 1.4; white-space: nowrap; text-align: left; }
         .stat-separator { width: 1px; min-height: 16px; background-color: rgba(255,255,255,0.2); margin: 0 2px; align-self: center; flex: 0 0 1px; }
         .net-section { min-width: 120px; margin-left: auto; }
@@ -140,7 +165,7 @@ import { pushSample, clampSparklineBars, cpuColor } from '../services/sparkline'
 export class ServerStatsBottomBarComponent implements OnInit, OnDestroy {
     visible = false
     loading = true
-    currentStats: any = { cpu: 0, mem: 0, disk: 0, netRx: 0, netTx: 0, custom: [] }
+    currentStats: any = { cpu: 0, iowait: 0, mem: 0, disk: 0, netRx: 0, netTx: 0, custom: [] }
     customMetrics: CustomMetric[] = []
     
     public styleConfig = { background: 'rgba(20, 20, 20, 0.85)' }
@@ -155,6 +180,12 @@ export class ServerStatsBottomBarComponent implements OnInit, OnDestroy {
     public cpuStyle: 'bar' | 'sparkline' = 'bar'
     // RAM display: 'bar' (progress bar + %) or 'text' (used / total). Default 'bar'.
     public ramStyle: 'bar' | 'text' = 'bar'
+    // Disk display: 'single' (root % progress bar) or 'mounts' (per-mount). Default 'single'.
+    public diskStyle: 'single' | 'mounts' = 'single'
+    public compactMounts: DiskMount[] = []
+    public mountsTooltip = ''
+    // First-class I/O wait %, computed in the core from /proc/stat delta. Optional.
+    public showIoWait = false
     @ViewChild('cpuSparkline') private cpuCanvas?: ElementRef<HTMLCanvasElement>
     public cpuHistory: number[] = []
     public sparklineBars = 40          // configurable, clamped 20..60
@@ -194,9 +225,18 @@ export class ServerStatsBottomBarComponent implements OnInit, OnDestroy {
     }
 
     getDiskColor(): string {
-        const disk = this.currentStats.disk;
-        if (disk < 50) return '#2ecc71';
-        if (disk < 80) return '#3498db';
+        return this.diskColorFor(this.currentStats.disk);
+    }
+
+    diskColorFor(pct: number): string {
+        if (pct < 50) return '#2ecc71';
+        if (pct < 80) return '#3498db';
+        return '#e74c3c';
+    }
+
+    ioColorFor(pct: number): string {
+        if (pct < 10) return '#2ecc71';
+        if (pct < 30) return '#f1c40f';
         return '#e74c3c';
     }
 
@@ -300,6 +340,8 @@ export class ServerStatsBottomBarComponent implements OnInit, OnDestroy {
         this.customMetrics = conf.customMetrics || [];
         this.cpuStyle = conf.cpuStyle === 'sparkline' ? 'sparkline' : 'bar';
         this.ramStyle = conf.ramStyle === 'text' ? 'text' : 'bar';
+        this.diskStyle = conf.diskStyle === 'mounts' ? 'mounts' : 'single';
+        this.showIoWait = !!conf.showIoWait;
         this.sparklineBars = clampSparklineBars(conf.sparklineBars);
         // Keep history within the (possibly reduced) bar count.
         if (this.cpuHistory.length > this.sparklineBars) {
@@ -373,6 +415,9 @@ export class ServerStatsBottomBarComponent implements OnInit, OnDestroy {
     updateStats(stats: { cpu: number, mem: number, disk: number, netRx: number, netTx: number }) {
         this.currentStats = stats
         this.cpuHistory = pushSample(this.cpuHistory, stats.cpu, this.sparklineBars)
+        const mounts = (stats as any).mounts as DiskMount[] | undefined
+        this.compactMounts = selectCompactMounts(mounts)
+        this.mountsTooltip = formatMountsTooltip(mounts)
     }
 
     // Draw the CPU history as thin vertical bars on the canvas. Newest sample is

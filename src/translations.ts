@@ -77,5 +77,13 @@ export const TRANSLATIONS = {
         'Percentage (as now) or numeric used / total, e.g. 3.2G/8G.': '百分比（当前方式）或数值“已用 / 总量”，例如 3.2G/8G。',
         'Percentage': '百分比',
         'Used / Total': '已用 / 总量',
+        'Disk Display': '磁盘显示',
+        'Root only, or per mount point (shows / plus the fullest local mounts; full list on hover). Bottom bar only.': '仅根目录，或按挂载点显示（显示 / 及占用最高的本地挂载点；悬停查看完整列表）。仅底部栏。',
+        'Root (/)': '根目录 (/)',
+        'Mount Points': '挂载点',
+        'Show I/O Wait': '显示 I/O 等待',
+        'CPU time spent waiting on disk I/O (Linux). Computed from /proc/stat — no extra command.': 'CPU 等待磁盘 I/O 的时间（Linux）。由 /proc/stat 计算，无需额外命令。',
+        'CPU time waiting on disk I/O': 'CPU 等待磁盘 I/O 的时间',
+        'IOW': 'IOW',
     }
 };

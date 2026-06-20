@@ -7,6 +7,8 @@ A plugin for [Tabby Terminal](https://github.com/Eugeny/tabby) that displays rea
 * **Real-time Monitoring**: Displays CPU usage, RAM usage, Disk usage, and Network upload/download speeds out of the box.  
 * **CPU sparkline (MobaXterm-like)**: Optional compact CPU history mini-chart in the bottom bar — thin vertical bars (configurable 20–60), newest on the right, with the current % beside it. Switch between the classic progress bar and the sparkline in settings.  
 * **RAM as used / total**: Optionally show memory as `3.2G/8.0G` (color-coded by load) instead of a percentage bar/chart, in both display modes.  
+* **Per-mount disk usage**: Optionally monitor all local mount points instead of just `/`. The bottom bar compactly shows `/` plus the fullest local mounts (e.g. `DISK / 42% │ /data 81%`) with the full list on hover; uses machine-parseable `df` (bytes), and filters out virtual/pseudo and network filesystems.  
+* **I/O Wait (optional)**: First-class CPU I/O-wait %, computed in the core from the `/proc/stat` delta — no extra command, no `sleep`. Enable it in settings (Linux).  
 * **Lightweight & responsive**: Polls **only the active tab**, computes CPU/network rates client-side from cheap `/proc` counters (no remote `sleep`), and reuses a single self-throttling poll loop — so background SSH tabs cost nothing and the UI stays smooth.  
 * **Configurable refresh interval**: From 1s (live monitoring) up to 60s, in **Settings → Server Stats**. The request timeout adapts to the interval and slow/erroring servers are backed off automatically.  
 * **Custom Metrics Engine**: Define your own metrics using shell commands (e.g., GPU usage, Temperature, Docker container count).  
@@ -68,6 +70,8 @@ In **Settings → Server Stats** you can configure:
 * **Refresh Interval** — how often stats are fetched (1–60s). Only the active tab is polled.
 * **CPU Display** — Progress Bar or Sparkline; when Sparkline, **Sparkline Bars** sets the history length (20–60).
 * **RAM Display** — Percentage (bar/chart) or numeric Used / Total (`3.2G/8.0G`).
+* **Disk Display** — Root only (`/`) or Mount Points (per-mount, bottom bar; full list on hover).
+* **Show I/O Wait** — adds a first-class CPU I/O-wait % (Linux, from `/proc/stat`).
 * **Debug Logging** — off by default. When enabled, diagnostic logs are written to a temp file (`tabby-server-stats.log`); useful only for troubleshooting.
 * **Built-in Presets & Custom Metrics**.
 
