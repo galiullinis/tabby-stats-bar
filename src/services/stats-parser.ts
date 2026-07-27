@@ -9,6 +9,8 @@ export const MARKERS = {
     next: 'TABBY-STATS-NEXT',
     diskStart: 'TABBY-STATS-DISK-START',
     diskEnd: 'TABBY-STATS-DISK-END',
+    sessStart: 'TABBY-STATS-SESS-START',
+    sessEnd: 'TABBY-STATS-SESS-END',
     end: 'TABBY-STATS-END',
 }
 
@@ -46,6 +48,10 @@ export interface FinalStats {
     disk: number
     memUsed?: number   // bytes
     memTotal?: number  // bytes
+    uptime?: number    // seconds since boot
+    load1?: number     // 1-minute load average
+    users?: number     // distinct logged-in users
+    sessions?: number  // established inbound SSH connections
     mounts?: DiskMount[]
     custom?: Array<{ id: string; value: string }>
 }
@@ -118,19 +124,19 @@ export function finalizeSample(
     now: number
 ): { stats: FinalStats; nextSample: DeltaSample | null } {
     if (sample.mode === 'V') {
-        // nums = [cpu, iowait, rx, tx, mem, memUsed, memTotal, disk]
-        const [cpu = 0, iowait = 0, rx = 0, tx = 0, mem = 0, memUsed = 0, memTotal = 0, disk = 0] = sample.nums
+        // nums = [cpu, iowait, rx, tx, mem, memUsed, memTotal, disk, uptime, load1]
+        const [cpu = 0, iowait = 0, rx = 0, tx = 0, mem = 0, memUsed = 0, memTotal = 0, disk = 0, uptime = 0, load1 = 0] = sample.nums
         return {
-            stats: { cpu, iowait, netRx: rx, netTx: tx, mem, disk, memUsed, memTotal },
+            stats: { cpu, iowait, netRx: rx, netTx: tx, mem, disk, memUsed, memTotal, uptime, load1 },
             nextSample: null,
         }
     }
-    // Delta mode: nums = [cpuTotal, cpuIdle, cpuIowait, rx, tx, mem, memUsed, memTotal, disk]
-    const [cpuTotal = 0, cpuIdle = 0, cpuIowait = 0, rx = 0, tx = 0, mem = 0, memUsed = 0, memTotal = 0, disk = 0] = sample.nums
+    // Delta mode: nums = [cpuTotal, cpuIdle, cpuIowait, rx, tx, mem, memUsed, memTotal, disk, uptime, load1]
+    const [cpuTotal = 0, cpuIdle = 0, cpuIowait = 0, rx = 0, tx = 0, mem = 0, memUsed = 0, memTotal = 0, disk = 0, uptime = 0, load1 = 0] = sample.nums
     const curr: DeltaSample = { cpuTotal, cpuIdle, cpuIowait, rx, tx, t: now }
     const d = computeDeltaStats(prev, curr)
     return {
-        stats: { cpu: d.cpu, iowait: d.iowait, netRx: d.netRx, netTx: d.netTx, mem, disk, memUsed, memTotal },
+        stats: { cpu: d.cpu, iowait: d.iowait, netRx: d.netRx, netTx: d.netTx, mem, disk, memUsed, memTotal, uptime, load1 },
         nextSample: curr,
     }
 }
@@ -211,6 +217,63 @@ export function parseDiskMounts(output: string): DiskMount[] | undefined {
 }
 
 /**
+ * Shell fragment for the optional session counters. Only the counters that are
+ * actually enabled are emitted, so a disabled one costs nothing on the host.
+ *
+ *   `U <n>` — distinct logged-in users (`who`; present on Linux/macOS/BSD).
+ *   `S <n>` — established INBOUND SSH connections, counted on the server port
+ *             taken from `$SSH_CONNECTION` (sshd sets it for exec channels too),
+ *             falling back to 22. Uses `ss` when available and `netstat`
+ *             otherwise — macOS/BSD and minimal images have no `ss`.
+ *
+ * Both counters end in `awk 'END{print n+0}'` and never in `grep -c`: `grep -c`
+ * exits 1 when the count is zero, and the old presets were wrapped in
+ * `( cmd ) || echo "Err"`, so the most common case (zero) printed "0" AND "Err".
+ */
+export function buildSessionsFragment(opts: { users?: boolean; sessions?: boolean }): string {
+    if (!opts.users && !opts.sessions) {
+        return ''
+    }
+    const usersCmd = `who 2>/dev/null | awk '{ u[$1]=1 } END { n=0; for (k in u) n++; print n+0 }'`
+    const port = `SSHPORT=\${SSH_CONNECTION##* }; case "$SSHPORT" in ''|*[!0-9]*) SSHPORT=22;; esac`
+    // The local-address column moves depending on the ss version (filtering by
+    // state usually drops the State column, but not everywhere), so its index is
+    // taken from the header instead of hard-coded. Matching the peer column
+    // instead would count OUTBOUND ssh connections from this host as inbound.
+    const ssCmd = `ss -tn state established 2>/dev/null | awk -v p=":$SSHPORT$" 'NR==1 { for (i=1; i<=NF; i++) if ($i == "Local") c=i; if (!c) c=3; next } c && $c ~ p { n++ } END { print n+0 }'`
+    const netstatCmd = `netstat -an 2>/dev/null | awk -v p="[.:]$SSHPORT$" '/ESTABLISHED/ && $4 ~ p { n++ } END { print n+0 }'`
+    const sessionsCmd = `if command -v ss >/dev/null 2>&1; then ${ssCmd}; else ${netstatCmd}; fi`
+
+    let fragment = `; echo "${MARKERS.sessStart}"`
+    if (opts.users) {
+        fragment += `; echo "U $(${usersCmd})"`
+    }
+    if (opts.sessions) {
+        fragment += `; ${port}; echo "S $(${sessionsCmd})"`
+    }
+    fragment += `; echo "${MARKERS.sessEnd}"`
+    return fragment
+}
+
+/** Parse the session-counter section. Absent counters stay undefined. Pure. */
+export function parseSessionCounts(output: string): { users?: number; sessions?: number } | undefined {
+    if (!output || !output.includes(MARKERS.sessStart)) {
+        return undefined
+    }
+    const part = output.split(MARKERS.sessStart)[1].split(MARKERS.sessEnd)[0]
+    const result: { users?: number; sessions?: number } = {}
+    const users = part.match(/^\s*U\s+(\d+)\s*$/m)
+    const sessions = part.match(/^\s*S\s+(\d+)\s*$/m)
+    if (users) {
+        result.users = Number(users[1])
+    }
+    if (sessions) {
+        result.sessions = Number(sessions[1])
+    }
+    return result.users === undefined && result.sessions === undefined ? undefined : result
+}
+
+/**
  * Pick the mounts to show in the compact UI: root `/` first (if present), then
  * the fullest "significant" mounts (by usage %), capped at `max`. Pure.
  */
@@ -226,14 +289,34 @@ export function selectCompactMounts(mounts: DiskMount[] | undefined, max = 3): D
     return root ? [root, ...others] : others
 }
 
-/** Full mount list for a hover tooltip: "mount  NN%  (used/total)" per line. Pure. */
-export function formatMountsTooltip(mounts: DiskMount[] | undefined): string {
-    if (!mounts || !mounts.length) {
-        return ''
+/**
+ * Uptime as a short human string: `12d 4h` / `4h 07m` / `37m`. Formatting lives
+ * here (not in the shell command) so it is uniform across Linux/macOS and
+ * testable. Returns '-' when the host did not report a usable value.
+ */
+export function formatUptime(seconds: number | undefined): string {
+    if (!seconds || !Number.isFinite(seconds) || seconds <= 0) {
+        return '-'
     }
-    return mounts
-        .map(m => `${m.mount}  ${m.usagePercent}%  (${formatBytes(m.usedBytes)}/${formatBytes(m.totalBytes)})`)
-        .join('\n')
+    const total = Math.floor(seconds)
+    const days = Math.floor(total / 86400)
+    const hours = Math.floor((total % 86400) / 3600)
+    const minutes = Math.floor((total % 3600) / 60)
+    if (days > 0) {
+        return `${days}d ${hours}h`
+    }
+    if (hours > 0) {
+        return `${hours}h ${String(minutes).padStart(2, '0')}m`
+    }
+    return `${minutes}m`
+}
+
+/** 1-minute load average, fixed to 2 decimals so the width stays stable. Pure. */
+export function formatLoad(load: number | undefined): string {
+    if (load === undefined || load === null || !Number.isFinite(load) || load < 0) {
+        return '-'
+    }
+    return load.toFixed(2)
 }
 
 /** Format a bytes/second value into a short human string. */

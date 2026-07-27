@@ -22,7 +22,16 @@ export class ServerStatsConfigProvider extends ConfigProvider {
                 cpuStyle: 'bar',
                 ramStyle: 'bar',
                 diskStyle: 'single',
+                netStyle: 'stacked',
                 showIoWait: false,
+                // First-class optional metrics (were built-in presets before).
+                showUptime: false,
+                showLoad: false,
+                showUsers: false,
+                showSessions: false,
+                // What the bottom bar does when the metrics no longer fit:
+                // 'scroll' keeps one row and adds arrow buttons, 'wrap' grows taller.
+                overflowMode: 'scroll',
                 sparklineBars: 40,
                 displayMode: 'bottomBar',
                 location: { x: null, y: null },

@@ -20,14 +20,14 @@
 | [src/services/session-tracker.ts](src/services/session-tracker.ts) | **Чистая логика**: `resolveFocusedSession` (спуск по `focusedTab`) + `LastActiveSessionTracker` (мультиввод/last-active). |
 | [src/services/poll-timing.ts](src/services/poll-timing.ts) | **Чистая логика**: `clampPollIntervalMs`, `adaptiveTimeoutMs`, `nextBackoffMs` (тайминги опроса). |
 | [src/services/sparkline.ts](src/services/sparkline.ts) | **Чистая логика**: `pushSample` (ring buffer истории CPU), `clampSparklineBars`, `cpuColor`. Отрисовка на canvas — в bottom-bar. |
+| [src/services/extra-metrics.ts](src/services/extra-metrics.ts) | **Чистая логика**: `buildExtraMetrics` — порядок, подписи, цвета и форматирование опциональных метрик (uptime / load / users / ssh sessions). Общая для bottom-bar и floating-панели. |
 | [src/components/bottom-bar.component.ts](src/components/bottom-bar.component.ts) | UI нижней панели. Управляется извне (`useExternalController`) из `index.ts`. |
 | [src/components/floating-panel.component.ts](src/components/floating-panel.component.ts) | UI плавающей панели с doughnut-графиками, drag&drop позиции. Singleton. |
 | [src/components/settings.component.ts](src/components/settings.component.ts) | Настройки: режим, интервал, debug, цвет/прозрачность, кастомные метрики, **встроенные** пресеты (без сети). |
-| [src/builtin-presets.ts](src/builtin-presets.ts) | **Встроенные пресеты** (в бандле, без удалённой загрузки). Типизированы, сгруппированы по категориям; есть `groupedBuiltinPresets()` и инструкция «HOW TO ADD» для расширения. |
+| [src/builtin-presets.ts](src/builtin-presets.ts) | **Встроенные пресеты** (в бандле, без удалённой загрузки) + `migrateRetiredPresets()` — снос копий пресетов, ставших first-class метриками. Есть `groupedBuiltinPresets()` и правила «что вообще должно быть пресетом». |
 | [src/config.ts](src/config.ts) | Дефолты конфига + интерфейс `CustomMetric`. |
 | [src/toolbar-button.provider.ts](src/toolbar-button.provider.ts) | Кнопка тулбара (вкл/выкл плагина). |
 | [src/translations.ts](src/translations.ts) | i18n строки. |
-| [presets.json](presets.json) | Библиотека пресетов метрик (также тянется с GitHub). |
 
 ## 3. Архитектурные решения (текущие)
 - **Bottom bar — per-tab**: на каждый элемент `ssh-tab` инъектируется отдельный
@@ -51,10 +51,17 @@
   хранится в `prevSamples` WeakMap по session). macOS — режим `V` (готовые
   значения, `ps` + `sysctl hw.memsize`). Timeout адаптивный (`adaptiveTimeoutMs`).
 - **Формат вывода** (после маркера START):
-  - `D cpuTotal cpuIdle cpuIowait rx tx mem% memUsedBytes memTotalBytes disk%`
-  - `V cpu% iowait% rx tx mem% memUsedBytes memTotalBytes disk%` (iowait=0 на macOS)
+  - `D cpuTotal cpuIdle cpuIowait rx tx mem% memUsedBytes memTotalBytes disk% uptimeSec load1`
+  - `V cpu% iowait% rx tx mem% memUsedBytes memTotalBytes disk% uptimeSec load1` (iowait=0 на macOS)
   Парсер — `parseBaseSample`; маппинг полей — `finalizeSample`. CPU% и iowait%
-  считаются client-side по дельте `/proc/stat` (`computeDeltaStats`).
+  считаются client-side по дельте `/proc/stat` (`computeDeltaStats`). Новые поля
+  добавляются **только в конец** — деструктуризация с дефолтами держит обратную
+  совместимость со старым (коротким) сэмплом.
+- **Опциональные секции команды** (в фиксированном порядке, до custom-метрик, т.к.
+  `parseCustom` считает всё между CUSTOM-START и END значениями пресетов):
+  disk-mounts (`buildDiskMountsFragment`, при `diskStyle='mounts'`) →
+  session-счётчики (`buildSessionsFragment`, при `showUsers`/`showSessions`) →
+  custom-метрики (`buildCustomMetricsFragment`). Выключенная секция не отправляется.
 - **Выполнение команд**: SSH — через `openSessionChannel`/`requestExec`; локально —
   `child_process.exec` с таймаутом 5s.
 
@@ -88,6 +95,16 @@
 - **[Security, Stage 3] Импорт пресета требует подтверждения** (показывает точную
   команду + предупреждение, что она исполнится на серверах). `fetch` пресетов — с
   `AbortController` timeout 10s.
+- **[Arch, Stage 3.6] Пресет ≠ метрика.** Пресет — это КОПИЯ команды, уезжающая в
+  конфиг пользователя навсегда: фикс в `builtin-presets.ts` до него уже не дойдёт.
+  Поэтому всё, что мы хотим контролировать (кроссплатформенность, обработка ошибок,
+  фиксированное место в баре), делается first-class метрикой: тумблер в
+  [config.ts](src/config.ts) + фрагмент команды + секция в компонентах. Пресеты
+  остаются только для host-специфичных вещей, которые пользователь всё равно правит.
+- **[Arch, Stage 3.6] Разделители секций bottom-bar — через CSS** (`.stat-section +
+  .stat-section { border-left }`) вместо явных `<div class="stat-separator">`.
+  Причина: с опциональными секциями явные разделители требуют логики «есть ли
+  сосед»; CSS-селектор соседа решает это бесплатно.
 - **[Arch, Stage 3] Убраны `window.serverStatsFloating/BottomBar` и `forceUpdate`.**
   Рефреш на toolbar-toggle идёт через `config.changed$` (оба компонента подписаны;
   floating теперь делает `checkAndFetch` сразу).
@@ -125,7 +142,7 @@
 npm install            # установка зависимостей (нужно для build и test)
 npm run build          # webpack production build -> dist/
 npm run watch          # webpack watch
-npm test               # jest (45 юнит-тестов чистой логики)
+npm test               # jest (104 юнит-теста чистой логики)
 npm run typecheck      # tsc --noEmit (быстрый typecheck без сборки)
 ```
 Линтера в проекте нет.
@@ -138,7 +155,7 @@ npm run typecheck      # tsc --noEmit (быстрый typecheck без сбор�
   - Мгновенный CPU на macOS (`top -l 2`/`iostat`); сеть на macOS (`netstat -ib` дельта).
   - Полностью вынести polling per-tab в общий сервис (убрать дублирование с floating).
   - Интеграционные тесты планировщика (jsdom): active-only, no-overlap, backoff.
-  - Кэш скомпилированной shell-команды; необязательный `loadavg` как встроенная метрика.
+  - Кэш скомпилированной shell-команды (сейчас строка собирается на каждый опрос).
   - Расширение встроенных пресетов через [builtin-presets.ts](src/builtin-presets.ts)
     (скелет готов). **Удалённую загрузку пресетов НЕ возвращать** (осознанное решение).
 
@@ -245,3 +262,47 @@ npm run typecheck      # tsc --noEmit (быстрый typecheck без сбор�
     macOS: iowait=0 (дешёвого источника нет).
   - Изменён формат полей `D`/`V` (см. §3) — парсер и тесты обновлены.
   - Верификация: `npm test` ✓ (68), `npx webpack` ✓ (exit 0), `npx tsc --noEmit` ✓.
+- **Stage 3.6 (готово) — uptime/load/users/ssh-sessions вынесены из пресетов,
+  переработана раскладка bottom-bar:**
+  - **Uptime и Load — first-class без единой дополнительной команды.** Читаются в
+    базовом сэмпле: Linux — один awk на оба файла (`/proc/uptime` + `/proc/loadavg`),
+    macOS — один `sysctl -n kern.boottime vm.loadavg` (раньше пресеты на macOS
+    просто печатали `Err`, т.к. `/proc` там нет). Форматирование — `formatUptime`/
+    `formatLoad` (клиент, тестируемые); старый пресет терял минуты (`0d 0h`).
+  - **Users и SSH Sessions — first-class с условным фрагментом** (`buildSessionsFragment`,
+    парсер `parseSessionCounts`): команда уходит на хост, только пока включён тумблер.
+    Тумблеры `showUptime`/`showLoad`/`showUsers`/`showSessions`.
+  - **Исправлен баг `grep -c`:** он выходит с кодом 1 при нуле совпадений, а обёртка
+    пресета — `( cmd ) || echo "Err"`, поэтому старые «Users» и «SSH Sessions» при
+    нулевом значении печатали `0` И `Err` (в бар уезжали две строки). Теперь везде
+    `awk 'END{print n+0}'`.
+  - **SSH Sessions надёжнее:** порт берётся из `$SSH_CONNECTION` (sshd выставляет его
+    и для exec-канала), fallback 22 — вместо захардкоженного `:22`; колонка Local
+    определяется по заголовку `ss` (её индекс зависит от версии), а не по `$3`;
+    при отсутствии `ss` — `netstat -an` (macOS/BSD/минимальные образы).
+  - **Пресет Temp починен:** `awk '...' file || echo 0` вместо `cat file | awk ... || echo 0`
+    — в старом виде `||` относился к пайплайну, awk на пустом входе выходил с 0,
+    и фолбэк был мёртвым кодом (значение приходило пустым).
+  - Из `BUILTIN_PRESETS` удалены Uptime/Load/Users/SSH Sessions. Для тех, кто уже
+    нажал «Add», добавлена одноразовая миграция `migrateRetiredPresets()` (вызов из
+    `index.ts` на `config.ready$`): копия сносится, соответствующий тумблер включается.
+  - **NET переехал из правого края** (убран `margin-left: auto`) и стоит перед DISK;
+    новый `netStyle` = `'stacked'` (две строки, дефолт) | `'inline'` (одна строка).
+  - **Переполнение bottom-bar:** `overflowMode` = `'scroll'` (дефолт: одна строка,
+    кнопки ‹ › + колесо мыши, авто-скрытие кнопок пока всё влезает) | `'wrap'`
+    (прежнее поведение — бар растёт вверх и съедает строки терминала). Состояние
+    кнопок пересчитывается по `ResizeObserver` + после каждого рендера.
+  - **Tooltip маунтов — свой, не нативный `title`:** задержка появления нативного
+    тултипа задаётся ОС (на macOS ~1.5–2s — это и ощущалось как «очень долго») и
+    не настраивается, плюс Chromium режет длинный текст. Теперь — фиксированные
+    500ms, `position: fixed` (не обрезается скролл-контейнером), полный список
+    маунтов со скроллом. `formatMountsTooltip` удалён за ненадобностью.
+  - Порядок секций bottom-bar: CPU → IOW → RAM → NET → **UP** → DISK → LOAD/USR/SSH → custom.
+    Место метрики задаётся полем `slot` в [extra-metrics.ts](src/services/extra-metrics.ts)
+    (`'afterNet' | 'afterDisk'`), а не порядком в шаблоне — компоненты просто рендерят
+    `extraMetricsFor(slot, ...)`. Цвет uptime — приглушённый жёлтый `#d6b656` (LOAD
+    остаётся ярким `#fdcb6e`, чтобы два жёлтых не спорили).
+    Floating-панель получила те же плитки + `flex-wrap`/`max-width`/`max-height`.
+  - Верификация: `npm test` ✓ (104), `npx webpack` ✓ (exit 0), `npx tsc --noEmit` ✓;
+    собранная команда прогнана на реальном macOS, Linux-ветка — на синтетическом
+    `/proc` и синтетическом выводе `ss` (обе раскладки колонок) / `netstat`.
