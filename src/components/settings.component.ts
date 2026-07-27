@@ -135,6 +135,46 @@ import { clampSparklineBars } from '../services/sparkline'
             </div>
         </div>
 
+        <!-- 网络显示样式 -->
+        <div class="form-line">
+            <div class="header">
+                <div class="title" translate>Network Display</div>
+                <div class="description" translate>Download and upload stacked on two rows, or side by side on one row. Bottom bar only.</div>
+            </div>
+            <div class="btn-group">
+                <input type="radio" class="btn-check" name="netStyle" id="netStyleStacked"
+                    autocomplete="off" value="stacked"
+                    [(ngModel)]="config.store.plugin.serverStats.netStyle"
+                    (ngModelChange)="save()">
+                <label class="btn btn-secondary" for="netStyleStacked" translate>Two Rows</label>
+                <input type="radio" class="btn-check" name="netStyle" id="netStyleInline"
+                    autocomplete="off" value="inline"
+                    [(ngModel)]="config.store.plugin.serverStats.netStyle"
+                    (ngModelChange)="save()">
+                <label class="btn btn-secondary" for="netStyleInline" translate>One Row</label>
+            </div>
+        </div>
+
+        <!-- 溢出行为 -->
+        <div class="form-line">
+            <div class="header">
+                <div class="title" translate>When Metrics Do Not Fit</div>
+                <div class="description" translate>Keep one row and scroll with the ‹ › buttons or the mouse wheel, or wrap onto more rows (which makes the bar taller). Bottom bar only.</div>
+            </div>
+            <div class="btn-group">
+                <input type="radio" class="btn-check" name="overflowMode" id="overflowScroll"
+                    autocomplete="off" value="scroll"
+                    [(ngModel)]="config.store.plugin.serverStats.overflowMode"
+                    (ngModelChange)="save()">
+                <label class="btn btn-secondary" for="overflowScroll" translate>Scroll</label>
+                <input type="radio" class="btn-check" name="overflowMode" id="overflowWrap"
+                    autocomplete="off" value="wrap"
+                    [(ngModel)]="config.store.plugin.serverStats.overflowMode"
+                    (ngModelChange)="save()">
+                <label class="btn btn-secondary" for="overflowWrap" translate>Wrap</label>
+            </div>
+        </div>
+
         <!-- I/O Wait 开关 -->
         <div class="form-line">
             <div class="header">
@@ -144,6 +184,58 @@ import { clampSparklineBars } from '../services/sparkline'
             <div class="form-check form-switch">
                 <input type="checkbox" class="form-check-input"
                     [(ngModel)]="config.store.plugin.serverStats.showIoWait"
+                    (ngModelChange)="save()">
+            </div>
+        </div>
+
+        <!-- Uptime 开关 -->
+        <div class="form-line">
+            <div class="header">
+                <div class="title" translate>Show Uptime</div>
+                <div class="description" translate>Time since boot. Read together with the base sample — no extra command.</div>
+            </div>
+            <div class="form-check form-switch">
+                <input type="checkbox" class="form-check-input"
+                    [(ngModel)]="config.store.plugin.serverStats.showUptime"
+                    (ngModelChange)="save()">
+            </div>
+        </div>
+
+        <!-- Load 开关 -->
+        <div class="form-line">
+            <div class="header">
+                <div class="title" translate>Show Load Average</div>
+                <div class="description" translate>1-minute load average. Read together with the base sample — no extra command.</div>
+            </div>
+            <div class="form-check form-switch">
+                <input type="checkbox" class="form-check-input"
+                    [(ngModel)]="config.store.plugin.serverStats.showLoad"
+                    (ngModelChange)="save()">
+            </div>
+        </div>
+
+        <!-- Users 开关 -->
+        <div class="form-line">
+            <div class="header">
+                <div class="title" translate>Show Logged-in Users</div>
+                <div class="description" translate>Number of distinct users currently logged in (who). Adds one command per refresh while enabled.</div>
+            </div>
+            <div class="form-check form-switch">
+                <input type="checkbox" class="form-check-input"
+                    [(ngModel)]="config.store.plugin.serverStats.showUsers"
+                    (ngModelChange)="save()">
+            </div>
+        </div>
+
+        <!-- SSH sessions 开关 -->
+        <div class="form-line">
+            <div class="header">
+                <div class="title" translate>Show SSH Sessions</div>
+                <div class="description" translate>Established inbound SSH connections on this host's SSH port. Adds one command per refresh while enabled.</div>
+            </div>
+            <div class="form-check form-switch">
+                <input type="checkbox" class="form-check-input"
+                    [(ngModel)]="config.store.plugin.serverStats.showSessions"
                     (ngModelChange)="save()">
             </div>
         </div>
@@ -175,7 +267,7 @@ import { clampSparklineBars } from '../services/sparkline'
         <div class="mt-4 mb-3">
             <h4 class="mb-0" translate>Built-in Presets</h4>
             <div class="text-muted" style="font-size: 13px;" translate>
-                Ready-made metrics bundled with the plugin. Review each command before adding it.
+                Ready-made metrics bundled with the plugin. Review each command before adding it. Uptime, load average, logged-in users, SSH sessions and I/O wait are no longer presets — use the toggles above instead.
             </div>
 
             <!-- 预设列表（按分类分组，便于扩展） -->

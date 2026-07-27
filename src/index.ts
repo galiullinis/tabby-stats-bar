@@ -10,6 +10,7 @@ import * as os from 'os'
 import * as path from 'path'
 
 import { ServerStatsConfigProvider } from './config'
+import { migrateRetiredPresets } from './builtin-presets'
 import { clampPollIntervalMs, nextBackoffMs } from './services/poll-timing'
 import { TRANSLATIONS } from './translations'
 import { StatsService } from './services/stats.service'
@@ -94,6 +95,19 @@ export default class ServerStatsModule {
                 })
             }, 1000);
         });
+
+        // One-time cleanup: presets that became first-class metrics are still
+        // sitting in the user's customMetrics (with their old bugs), because a
+        // preset is copied into the config when added. Drop them and switch on
+        // the metric that replaced them.
+        this.config.ready$.subscribe(() => {
+            this.safeRun('migrateRetiredPresets', () => {
+                if (migrateRetiredPresets(this.config.store?.plugin?.serverStats)) {
+                    logDebug('[state] migrated retired presets')
+                    this.config.save()
+                }
+            })
+        })
 
         this.config.ready$.subscribe(() => {
             setTimeout(() => {

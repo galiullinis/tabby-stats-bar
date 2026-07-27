@@ -6,6 +6,7 @@ import { ChartConfiguration, ChartData, ChartType } from 'chart.js'
 import { StatsService } from '../services/stats.service'
 import { CustomMetric } from '../config'
 import { formatSpeed, formatBytes } from '../services/stats-parser'
+import { buildExtraMetrics, extraMetricsFor, ExtraMetric } from '../services/extra-metrics'
 import { clampPollIntervalMs, nextBackoffMs } from '../services/poll-timing'
 import { resolveFocusedSession, LastActiveSessionTracker } from '../services/session-tracker'
 
@@ -50,12 +51,42 @@ import { resolveFocusedSession, LastActiveSessionTracker } from '../services/ses
                 </ng-template>
             </div>
 
-            <div class="chart-wrapper" 
-                 [style.width.px]="styleConfig.size" 
+            <!-- 网络流量 -->
+            <div class="chart-wrapper"
+                 [style.width.px]="styleConfig.size"
+                 [style.height.px]="styleConfig.size">
+                <div class="chart-label">{{ 'NET' | translate }}</div>
+                <div class="net-container">
+                    <div class="net-row download">
+                         <span>↓</span> {{ formatSpeed(currentStats.netRx) }}
+                    </div>
+                    <div class="net-row upload">
+                         <span>↑</span> {{ formatSpeed(currentStats.netTx) }}
+                    </div>
+                </div>
+            </div>
+
+            <div class="chart-wrapper" *ngFor="let extra of extrasAfterNet"
+                 [style.width.px]="styleConfig.size"
+                 [style.height.px]="styleConfig.size">
+                <div class="chart-label" title="{{ extra.title | translate }}">{{ extra.label | translate }}</div>
+                <div class="ram-text-value" [style.color]="extra.color">{{ extra.value }}</div>
+            </div>
+
+            <div class="chart-wrapper"
+                 [style.width.px]="styleConfig.size"
                  [style.height.px]="styleConfig.size">
                 <div class="chart-label">{{ 'DISK' | translate }}</div>
                 <canvas baseChart [data]="diskData" [options]="chartOptions" [type]="doughnutChartType"></canvas>
                 <div class="chart-value">{{currentStats.disk | number:'1.0-0'}}%</div>
+            </div>
+
+            <!-- Load / Users / SSH sessions (uptime sits right after NET) -->
+            <div class="chart-wrapper" *ngFor="let extra of extrasAfterDisk"
+                 [style.width.px]="styleConfig.size"
+                 [style.height.px]="styleConfig.size">
+                <div class="chart-label" title="{{ extra.title | translate }}">{{ extra.label | translate }}</div>
+                <div class="ram-text-value" [style.color]="extra.color">{{ extra.value }}</div>
             </div>
 
             <!-- 自定义指标 -->
@@ -77,21 +108,6 @@ import { resolveFocusedSession, LastActiveSessionTracker } from '../services/ses
                     </ng-container>
                 </div>
             </ng-container>
-
-            <!-- 网络流量 -->
-            <div class="chart-wrapper" 
-                 [style.width.px]="styleConfig.size" 
-                 [style.height.px]="styleConfig.size">
-                <div class="chart-label">{{ 'NET' | translate }}</div>
-                <div class="net-container">
-                    <div class="net-row download">
-                         <span>↓</span> {{ formatSpeed(currentStats.netRx) }}
-                    </div>
-                    <div class="net-row upload">
-                         <span>↑</span> {{ formatSpeed(currentStats.netTx) }}
-                    </div>
-                </div>
-            </div>
         </div>
     `,
     styles: [`
@@ -103,8 +119,14 @@ import { resolveFocusedSession, LastActiveSessionTracker } from '../services/ses
             z-index: 10000; 
             backdrop-filter: blur(12px);
             padding: 0px 10px 0px 10px;
-            display: flex; 
+            display: flex;
             gap: 15px;
+            /* With enough metrics enabled the panel would otherwise grow past the
+               window edge; wrap first, then scroll as a last resort. */
+            flex-wrap: wrap;
+            max-width: 92vw;
+            max-height: 92vh;
+            overflow: auto;
             border-radius: 8px;
             border: 1px solid rgba(255,255,255,0.2);
             box-shadow: 0 10px 30px rgba(0,0,0,0.5);
@@ -167,6 +189,10 @@ export class ServerStatsFloatingPanelComponent implements OnInit, OnDestroy {
     public ramStyle: 'bar' | 'text' = 'bar'
     // First-class I/O wait %, computed in the core from /proc/stat delta. Optional.
     public showIoWait = false
+    // Uptime / load / users / SSH sessions — optional, shared with the bottom bar.
+    // Uptime sits right after NET; the rest follow DISK.
+    public extrasAfterNet: ExtraMetric[] = []
+    public extrasAfterDisk: ExtraMetric[] = []
 
     private isDragging = false
     private dragOffset = { x: 0, y: 0 }
@@ -267,6 +293,7 @@ export class ServerStatsFloatingPanelComponent implements OnInit, OnDestroy {
         this.customChartsData = this.customMetrics.map(m =>
             this.createChartData(m.color || '#00ff00')
         );
+        this.applyExtraMetrics(conf, this.currentStats);
 
         setTimeout(() => this.adjustPositionToViewport(), 100);
         this.cdr.detectChanges();
@@ -274,6 +301,12 @@ export class ServerStatsFloatingPanelComponent implements OnInit, OnDestroy {
 
     formatSpeed(bytes: number): string {
         return formatSpeed(bytes);
+    }
+
+    private applyExtraMetrics(conf: any, stats: any) {
+        const extras = buildExtraMetrics(conf, stats);
+        this.extrasAfterNet = extraMetricsFor('afterNet', extras);
+        this.extrasAfterDisk = extraMetricsFor('afterDisk', extras);
     }
 
     getMemColor(): string {
@@ -422,7 +455,8 @@ export class ServerStatsFloatingPanelComponent implements OnInit, OnDestroy {
 
     updateCharts(stats: any) {
         this.currentStats = stats
-        
+        this.applyExtraMetrics(this.config.store.plugin?.serverStats, stats)
+
         // 更新基础图表
         this.cpuData.datasets[0].data = [stats.cpu, 100 - stats.cpu]
         this.memData.datasets[0].data = [stats.mem, 100 - stats.mem]

@@ -6,7 +6,10 @@ import {
     buildCustomMetricsFragment,
     parseDiskMounts,
     selectCompactMounts,
-    formatMountsTooltip,
+    buildSessionsFragment,
+    parseSessionCounts,
+    formatUptime,
+    formatLoad,
     buildDiskMountsFragment,
     formatSpeed,
     formatBytes,
@@ -85,7 +88,7 @@ describe('computeDeltaStats', () => {
 describe('finalizeSample', () => {
     it('values mode maps fields directly (incl. iowait/memUsed/memTotal) and keeps no sample', () => {
         const { stats, nextSample } = finalizeSample({ mode: 'V', nums: [10, 0, 1, 2, 30, 2000, 6000, 40] }, null, 1000)
-        expect(stats).toEqual({ cpu: 10, iowait: 0, netRx: 1, netTx: 2, mem: 30, disk: 40, memUsed: 2000, memTotal: 6000 })
+        expect(stats).toEqual({ cpu: 10, iowait: 0, netRx: 1, netTx: 2, mem: 30, disk: 40, memUsed: 2000, memTotal: 6000, uptime: 0, load1: 0 })
         expect(nextSample).toBeNull()
     })
 
@@ -209,16 +212,6 @@ describe('selectCompactMounts', () => {
     })
 })
 
-describe('formatMountsTooltip', () => {
-    it('lists every mount with used/total', () => {
-        const t = formatMountsTooltip([mnt('/', 50, 8 * GiB)])
-        expect(t).toBe('/  50%  (4.0G/8.0G)')
-    })
-    it('is empty for no mounts', () => {
-        expect(formatMountsTooltip([])).toBe('')
-    })
-})
-
 describe('buildDiskMountsFragment', () => {
     it('uses df -P (not -h), filters /dev, and wraps in markers', () => {
         const f = buildDiskMountsFragment()
@@ -241,5 +234,122 @@ describe('formatBytes', () => {
         expect(formatBytes(512 * 1024 ** 2)).toBe('512.0M')
         expect(formatBytes(2147483648)).toBe('2.0G')
         expect(formatBytes(3.2 * 1024 ** 3)).toBe('3.2G')
+    })
+})
+
+describe('formatUptime', () => {
+    it('shows days and hours for long uptimes', () => {
+        expect(formatUptime(12 * 86400 + 4 * 3600 + 59 * 60)).toBe('12d 4h')
+    })
+    it('shows hours and zero-padded minutes below a day', () => {
+        expect(formatUptime(4 * 3600 + 7 * 60)).toBe('4h 07m')
+    })
+    it('shows minutes below an hour (the old preset printed "0d 0h" here)', () => {
+        expect(formatUptime(37 * 60 + 42)).toBe('37m')
+    })
+    it('falls back to a dash for missing/invalid values', () => {
+        expect(formatUptime(0)).toBe('-')
+        expect(formatUptime(undefined)).toBe('-')
+        expect(formatUptime(-5)).toBe('-')
+        expect(formatUptime(NaN)).toBe('-')
+    })
+})
+
+describe('formatLoad', () => {
+    it('keeps two decimals for a stable width', () => {
+        expect(formatLoad(1)).toBe('1.00')
+        expect(formatLoad(0.756)).toBe('0.76')
+    })
+    it('keeps a real zero (not a dash)', () => {
+        expect(formatLoad(0)).toBe('0.00')
+    })
+    it('falls back to a dash for missing/invalid values', () => {
+        expect(formatLoad(undefined)).toBe('-')
+        expect(formatLoad(NaN)).toBe('-')
+        expect(formatLoad(-1)).toBe('-')
+    })
+})
+
+describe('finalizeSample (uptime / load fields)', () => {
+    it('reads uptime and load from the delta line', () => {
+        const { stats } = finalizeSample(
+            { mode: 'D', nums: [1000, 900, 5, 5, 5, 60, 100, 200, 75, 98765, 1.42] }, null, 1000)
+        expect(stats.uptime).toBe(98765)
+        expect(stats.load1).toBe(1.42)
+    })
+    it('reads uptime and load from the values line', () => {
+        const { stats } = finalizeSample(
+            { mode: 'V', nums: [10, 0, 1, 2, 30, 2000, 6000, 40, 123, 0.5] }, null, 1000)
+        expect(stats.uptime).toBe(123)
+        expect(stats.load1).toBe(0.5)
+    })
+    it('defaults to zero when an older/short line has no such fields', () => {
+        const { stats } = finalizeSample({ mode: 'V', nums: [10, 0, 1, 2, 30, 2000, 6000, 40] }, null, 1000)
+        expect(stats.uptime).toBe(0)
+        expect(stats.load1).toBe(0)
+    })
+})
+
+describe('buildSessionsFragment', () => {
+    it('is empty when neither counter is enabled', () => {
+        expect(buildSessionsFragment({})).toBe('')
+        expect(buildSessionsFragment({ users: false, sessions: false })).toBe('')
+    })
+    it('emits only the enabled counters', () => {
+        const usersOnly = buildSessionsFragment({ users: true })
+        expect(usersOnly).toContain('echo "U $(')
+        expect(usersOnly).not.toContain('echo "S $(')
+        const sessionsOnly = buildSessionsFragment({ sessions: true })
+        expect(sessionsOnly).toContain('echo "S $(')
+        expect(sessionsOnly).not.toContain('echo "U $(')
+    })
+    it('wraps the section in markers', () => {
+        const f = buildSessionsFragment({ users: true, sessions: true })
+        expect(f).toContain(MARKERS.sessStart)
+        expect(f).toContain(MARKERS.sessEnd)
+    })
+    it('never uses grep -c (it exits 1 on zero matches and triggers the Err fallback)', () => {
+        const f = buildSessionsFragment({ users: true, sessions: true })
+        expect(f).not.toContain('grep -c')
+        expect(f).toContain('print n+0')
+    })
+    it('takes the SSH port from $SSH_CONNECTION with a 22 fallback', () => {
+        const f = buildSessionsFragment({ sessions: true })
+        expect(f).toContain('SSHPORT=${SSH_CONNECTION##* }')
+        expect(f).toContain('SSHPORT=22')
+    })
+    it('falls back to netstat where ss is unavailable (macOS/BSD/minimal images)', () => {
+        const f = buildSessionsFragment({ sessions: true })
+        expect(f).toContain('command -v ss')
+        expect(f).toContain('netstat -an')
+    })
+    it('locates the local-address column from the ss header instead of hard-coding it', () => {
+        const f = buildSessionsFragment({ sessions: true })
+        expect(f).toContain('$i == "Local"')
+    })
+})
+
+describe('parseSessionCounts', () => {
+    const wrap = (body: string) => `${MARKERS.start} D 1 2 3\n${MARKERS.sessStart}\n${body}\n${MARKERS.sessEnd}\n${MARKERS.end}`
+
+    it('returns undefined when the section is absent', () => {
+        expect(parseSessionCounts(`${MARKERS.start} D 1 2 3 ${MARKERS.end}`)).toBeUndefined()
+        expect(parseSessionCounts('')).toBeUndefined()
+    })
+    it('parses both counters', () => {
+        expect(parseSessionCounts(wrap('U 3\nS 7'))).toEqual({ users: 3, sessions: 7 })
+    })
+    it('parses zero as zero (not as missing)', () => {
+        expect(parseSessionCounts(wrap('U 0\nS 0'))).toEqual({ users: 0, sessions: 0 })
+    })
+    it('leaves a disabled counter undefined', () => {
+        expect(parseSessionCounts(wrap('U 2'))).toEqual({ users: 2 })
+        expect(parseSessionCounts(wrap('S 5'))).toEqual({ sessions: 5 })
+    })
+    it('tolerates CRLF line endings', () => {
+        expect(parseSessionCounts(wrap('U 1\r\nS 2\r'))).toEqual({ users: 1, sessions: 2 })
+    })
+    it('returns undefined when the section has no parseable values', () => {
+        expect(parseSessionCounts(wrap('sh: who: not found'))).toBeUndefined()
     })
 })
