@@ -5,7 +5,7 @@ import { BaseChartDirective } from 'ng2-charts'
 import { ChartConfiguration, ChartData, ChartType } from 'chart.js'
 import { StatsService } from '../services/stats.service'
 import { CustomMetric } from '../config'
-import { formatSpeed, formatBytes } from '../services/stats-parser'
+import { formatSpeed, formatBytes, NetUnit } from '../services/stats-parser'
 import { buildExtraMetrics, extraMetricsFor, ExtraMetric } from '../services/extra-metrics'
 import { clampPollIntervalMs, nextBackoffMs } from '../services/poll-timing'
 import { resolveFocusedSession, LastActiveSessionTracker } from '../services/session-tracker'
@@ -187,6 +187,7 @@ export class ServerStatsFloatingPanelComponent implements OnInit, OnDestroy {
     customChartsData: ChartData<'doughnut'>[] = []
     // RAM display: 'bar' (doughnut + %) or 'text' (used / total). Default 'bar'.
     public ramStyle: 'bar' | 'text' = 'bar'
+    public netUnit: NetUnit = 'bits'
     // First-class I/O wait %, computed in the core from /proc/stat delta. Optional.
     public showIoWait = false
     // Uptime / load / users / SSH sessions — optional, shared with the bottom bar.
@@ -286,6 +287,7 @@ export class ServerStatsFloatingPanelComponent implements OnInit, OnDestroy {
         }
 
         this.ramStyle = conf.ramStyle === 'text' ? 'text' : 'bar';
+        this.netUnit = conf.netUnit === 'bytes' ? 'bytes' : 'bits';
         this.showIoWait = !!conf.showIoWait;
 
         // 加载自定义指标
@@ -300,7 +302,7 @@ export class ServerStatsFloatingPanelComponent implements OnInit, OnDestroy {
     }
 
     formatSpeed(bytes: number): string {
-        return formatSpeed(bytes);
+        return formatSpeed(bytes, this.netUnit);
     }
 
     private applyExtraMetrics(conf: any, stats: any) {

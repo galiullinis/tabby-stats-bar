@@ -5,6 +5,8 @@ import {
     DEFAULT_POLL_INTERVAL_MS,
     MIN_POLL_INTERVAL_MS,
     MAX_POLL_INTERVAL_MS,
+    maxDeltaGapMs,
+    MIN_DELTA_GAP_MS,
 } from '../src/services/poll-timing'
 
 describe('clampPollIntervalMs', () => {
@@ -49,5 +51,16 @@ describe('nextBackoffMs', () => {
     it('caps at max', () => {
         expect(nextBackoffMs(30_000, true)).toBe(30_000)
         expect(nextBackoffMs(20_000, true)).toBe(30_000)
+    })
+})
+
+describe('maxDeltaGapMs', () => {
+    it('keeps the 30s floor for short intervals', () => {
+        expect(maxDeltaGapMs(1000)).toBe(MIN_DELTA_GAP_MS)
+        expect(maxDeltaGapMs(5000)).toBe(MIN_DELTA_GAP_MS)
+    })
+    it('scales with long intervals so 31–60s polling is not always "stale"', () => {
+        expect(maxDeltaGapMs(45_000)).toBe(135_000)
+        expect(maxDeltaGapMs(MAX_POLL_INTERVAL_MS)).toBeGreaterThan(MAX_POLL_INTERVAL_MS)
     })
 })

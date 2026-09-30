@@ -155,6 +155,26 @@ import { clampSparklineBars } from '../services/sparkline'
             </div>
         </div>
 
+        <!-- 网络速度单位 -->
+        <div class="form-line">
+            <div class="header">
+                <div class="title" translate>Network Units</div>
+                <div class="description" translate>Bits per second (Kb/s, Mb/s — decimal), as link speeds and Grafana dashboards show it, or bytes per second (K/s, M/s — binary).</div>
+            </div>
+            <div class="btn-group">
+                <input type="radio" class="btn-check" name="netUnit" id="netUnitBits"
+                    autocomplete="off" value="bits"
+                    [(ngModel)]="config.store.plugin.serverStats.netUnit"
+                    (ngModelChange)="save()">
+                <label class="btn btn-secondary" for="netUnitBits" translate>Bits/s</label>
+                <input type="radio" class="btn-check" name="netUnit" id="netUnitBytes"
+                    autocomplete="off" value="bytes"
+                    [(ngModel)]="config.store.plugin.serverStats.netUnit"
+                    (ngModelChange)="save()">
+                <label class="btn btn-secondary" for="netUnitBytes" translate>Bytes/s</label>
+            </div>
+        </div>
+
         <!-- 溢出行为 -->
         <div class="form-line">
             <div class="header">

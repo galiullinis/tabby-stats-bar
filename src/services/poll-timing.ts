@@ -40,3 +40,17 @@ export function nextBackoffMs(current: number, failed: boolean, base = 2000, max
     }
     return Math.min(max, current * 2)
 }
+
+// Floor for the "stale sample" threshold used by the delta computation.
+export const MIN_DELTA_GAP_MS = 30_000
+
+/**
+ * Max allowed gap between two delta samples before the older one is treated as
+ * stale (rate = 0, start over). Must scale with the poll interval: a fixed 30s
+ * cap made every sample stale when the user picked a 31–60s interval, so
+ * CPU/IOW/network stayed at 0 forever. 3× the interval leaves room for backoff
+ * and slow responses while still discarding samples from a long-idle tab.
+ */
+export function maxDeltaGapMs(intervalMs: number): number {
+    return Math.max(MIN_DELTA_GAP_MS, intervalMs * 3)
+}

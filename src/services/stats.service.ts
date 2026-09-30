@@ -12,10 +12,11 @@ import {
     parseDiskMounts,
     buildSessionsFragment,
     parseSessionCounts,
+    buildLinuxNetFragment,
     DeltaSample,
 } from './stats-parser'
 import { execSshCommand } from './ssh-exec'
-import { clampPollIntervalMs, adaptiveTimeoutMs } from './poll-timing'
+import { clampPollIntervalMs, adaptiveTimeoutMs, maxDeltaGapMs } from './poll-timing'
 
 @Injectable({ providedIn: 'root' })
 export class StatsService {
@@ -27,14 +28,15 @@ export class StatsService {
     //   (e.g. 1s) polling viable — each remote call returns immediately.
     // macOS (mode "V" = values): emits already-computed values (no cheap /proc).
     //
-    // Linux fields after "D": cpuTotal cpuIdle cpuIowait rxBytes txBytes mem% memUsedBytes memTotalBytes disk% uptimeSec load1
+    // Linux fields after "D": cpuTotal cpuIdle cpuIowait rxBytes txBytes mem% memUsedBytes memTotalBytes disk% uptimeSec load1 clk
+    //   rx/tx = physical interfaces only; clk = server clock for the rate interval (see buildLinuxNetFragment)
     // macOS fields after "V": cpu% iowait% rx tx mem% memUsedBytes memTotalBytes disk% uptimeSec load1  (iowait=0; no cheap source)
     //
     // Uptime and load average are collected UNCONDITIONALLY, because they cost a
     // single extra process each (one awk reading both /proc files on Linux, one
     // `sysctl -n` reading both keys on macOS) and keeping them in the base line
     // makes the field layout stable. Whether they are *displayed* is a UI toggle.
-    private baseStatsCommand = `export LC_ALL=C; PATH=$PATH:/usr/bin:/bin:/usr/sbin:/sbin; OS=$(uname -s 2>/dev/null || echo Linux); if [ "$OS" = "Darwin" ]; then set -- $(ps -A -o %cpu= -o %mem= 2>/dev/null | awk '{c+=$1; m+=$2} END {printf "%.1f %.1f", c+0, m+0}'); cpu=$1; mem=$2; memtotal=$(sysctl -n hw.memsize 2>/dev/null || echo 0); memused=$(awk -v p="$mem" -v t="$memtotal" 'BEGIN{ if (t>0) printf "%d", t*p/100; else print 0 }'); disk=$(df -P / 2>/dev/null | awk 'NR==2{gsub(/%/,"",$5); print $5}'); sys=$(sysctl -n kern.boottime vm.loadavg 2>/dev/null | awk -v now=$(date +%s) '/sec *=/ { b=$4; gsub(/[^0-9]/,"",b) } !/sec *=/ { l=$2 } END { printf "%d %s", (b>0 ? now-b : 0), (l=="" ? "0" : l) }'); if [ -z "$cpu" ]; then cpu=0; fi; if [ -z "$mem" ]; then mem=0; fi; if [ -z "$memtotal" ]; then memtotal=0; fi; if [ -z "$memused" ]; then memused=0; fi; if [ -z "$disk" ]; then disk=0; fi; if [ -z "$sys" ]; then sys="0 0"; fi; echo "TABBY-STATS-START V $cpu 0 0 0 $mem $memused $memtotal $disk $sys"; else cpu=$(awk '/^cpu /{print $2+$3+$4+$5+$6+$7+$8, $5, $6; exit}' /proc/stat 2>/dev/null); net=$(awk 'NR>2 && $1!="lo:"{rx+=$2; tx+=$10} END {print rx+0, tx+0}' /proc/net/dev 2>/dev/null); mem=$(awk '/^MemTotal/{t=$2} /^MemAvailable/{a=$2} END {u=t-a; if (t<=0){print "0 0 0"} else {printf "%.1f %d %d", u/t*100, u*1024, t*1024}}' /proc/meminfo 2>/dev/null); disk=$(df -P / 2>/dev/null | awk 'NR==2{gsub(/%/,"",$5); print $5}'); sys=$(awk 'FNR==1 { if (FILENAME ~ /loadavg/) l=$1; else u=int($1) } END { printf "%d %s", u+0, (l=="" ? "0" : l) }' /proc/uptime /proc/loadavg 2>/dev/null); if [ -z "$cpu" ]; then cpu="0 0 0"; fi; if [ -z "$net" ]; then net="0 0"; fi; if [ -z "$mem" ]; then mem="0 0 0"; fi; if [ -z "$disk" ]; then disk=0; fi; if [ -z "$sys" ]; then sys="0 0"; fi; echo "TABBY-STATS-START D $cpu $net $mem $disk $sys"; fi`
+    private baseStatsCommand = `export LC_ALL=C; PATH=$PATH:/usr/bin:/bin:/usr/sbin:/sbin; OS=$(uname -s 2>/dev/null || echo Linux); if [ "$OS" = "Darwin" ]; then set -- $(ps -A -o %cpu= -o %mem= 2>/dev/null | awk '{c+=$1; m+=$2} END {printf "%.1f %.1f", c+0, m+0}'); cpu=$1; mem=$2; memtotal=$(sysctl -n hw.memsize 2>/dev/null || echo 0); memused=$(awk -v p="$mem" -v t="$memtotal" 'BEGIN{ if (t>0) printf "%.0f", t*p/100; else print 0 }'); disk=$(df -P / 2>/dev/null | awk 'NR==2{gsub(/%/,"",$5); print $5}'); sys=$(sysctl -n kern.boottime vm.loadavg 2>/dev/null | awk -v now=$(date +%s) '/sec *=/ { b=$4; gsub(/[^0-9]/,"",b) } !/sec *=/ { l=$2 } END { printf "%d %s", (b>0 ? now-b : 0), (l=="" ? "0" : l) }'); if [ -z "$cpu" ]; then cpu=0; fi; if [ -z "$mem" ]; then mem=0; fi; if [ -z "$memtotal" ]; then memtotal=0; fi; if [ -z "$memused" ]; then memused=0; fi; if [ -z "$disk" ]; then disk=0; fi; if [ -z "$sys" ]; then sys="0 0"; fi; echo "TABBY-STATS-START V $cpu 0 0 0 $mem $memused $memtotal $disk $sys"; else cpu=$(awk '/^cpu /{print $2+$3+$4+$5+$6+$7+$8, $5, $6; exit}' /proc/stat 2>/dev/null); ${buildLinuxNetFragment()}; mem=$(awk '/^MemTotal/{t=$2} /^MemAvailable/{a=$2} END {u=t-a; if (t<=0){print "0 0 0"} else {printf "%.1f %.0f %.0f", u/t*100, u*1024, t*1024}}' /proc/meminfo 2>/dev/null); disk=$(df -P / 2>/dev/null | awk 'NR==2{gsub(/%/,"",$5); print $5}'); sys=$(awk 'FNR==1 { if (FILENAME ~ /loadavg/) l=$1; else u=int($1) } END { printf "%d %s", u+0, (l=="" ? "0" : l) }' /proc/uptime /proc/loadavg 2>/dev/null); if [ -z "$cpu" ]; then cpu="0 0 0"; fi; if [ -z "$net" ]; then net="0 0"; fi; if [ -z "$mem" ]; then mem="0 0 0"; fi; if [ -z "$disk" ]; then disk=0; fi; if [ -z "$sys" ]; then sys="0 0"; fi; echo "TABBY-STATS-START D $cpu $net $mem $disk $sys $clk"; fi`
 
     // Per-session guard (no overlapping fetch for the same session) and previous
     // raw sample (for client-side delta computation).
@@ -49,9 +51,8 @@ export class StatsService {
         return isSSH || process.platform === 'linux' || process.platform === 'darwin';
     }
 
-    private getTimeoutMs(): number {
-        const seconds = this.config.store?.plugin?.serverStats?.pollInterval;
-        return adaptiveTimeoutMs(clampPollIntervalMs(seconds));
+    private getIntervalMs(): number {
+        return clampPollIntervalMs(this.config.store?.plugin?.serverStats?.pollInterval);
     }
 
     async fetchStats(session: any): Promise<any | null> {
@@ -91,7 +92,7 @@ export class StatsService {
             finalCommand = finalCommand.replace(/\n/g, ' ');
             finalCommand = `/bin/sh -c '${finalCommand.replace(/'/g, "'\\''")}'`;
 
-            const timeoutMs = this.getTimeoutMs();
+            const timeoutMs = adaptiveTimeoutMs(this.getIntervalMs());
             let output: string | null = null;
 
             if (isSSH) {
@@ -107,7 +108,7 @@ export class StatsService {
             }
 
             const prev = this.prevSamples.get(session);
-            const { stats, nextSample } = finalizeSample(base, prev, Date.now());
+            const { stats, nextSample } = finalizeSample(base, prev, Date.now(), maxDeltaGapMs(this.getIntervalMs()));
             if (nextSample) {
                 this.prevSamples.set(session, nextSample);
             }

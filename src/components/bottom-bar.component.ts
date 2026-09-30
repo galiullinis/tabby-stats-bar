@@ -3,7 +3,7 @@ import { Subscription } from 'rxjs'
 import { AppService, ConfigService } from 'tabby-core'
 import { StatsService } from '../services/stats.service'
 import { CustomMetric } from '../config'
-import { formatSpeed, formatBytes, selectCompactMounts, DiskMount } from '../services/stats-parser'
+import { formatSpeed, formatBytes, NetUnit, selectCompactMounts, DiskMount } from '../services/stats-parser'
 import { clampPollIntervalMs } from '../services/poll-timing'
 import { pushSample, clampSparklineBars, cpuColor } from '../services/sparkline'
 import { buildExtraMetrics, extraMetricsFor, ExtraMetric } from '../services/extra-metrics'
@@ -71,7 +71,7 @@ import { buildExtraMetrics, extraMetricsFor, ExtraMetric } from '../services/ext
 
                     <div class="stat-section">
                         <div class="stat-label">{{ 'NET' | translate }}</div>
-                        <div class="net-container" [class.inline]="netStyle === 'inline'">
+                        <div class="net-container" [class.inline]="netStyle === 'inline'" [class.bits]="netUnit === 'bits'">
                             <div class="net-row download">
                                 <span class="net-arrow">↓</span><span class="net-value">{{ formatSpeed(currentStats.netRx) }}</span>
                             </div>
@@ -225,6 +225,7 @@ import { buildExtraMetrics, extraMetricsFor, ExtraMetric } from '../services/ext
         .net-arrow { display: inline-block; }
         .net-value { display: inline-block; min-width: 58px; text-align: left; }
         .net-container.inline .net-value { min-width: 62px; }
+        .net-container.bits .net-value { min-width: 66px; }
         .download { color: #2ecc71; }
         .upload { color: #e74c3c; }
         .loading-text { color: rgba(255,255,255,0.6); font-size: 10px; font-style: italic; }
@@ -271,6 +272,7 @@ export class ServerStatsBottomBarComponent implements OnInit, OnDestroy {
     public cpuStyle: 'bar' | 'sparkline' = 'bar'
     // RAM display: 'bar' (progress bar + %) or 'text' (used / total). Default 'bar'.
     public ramStyle: 'bar' | 'text' = 'bar'
+    public netUnit: NetUnit = 'bits'
     // Disk display: 'single' (root % progress bar) or 'mounts' (per-mount). Default 'single'.
     public diskStyle: 'single' | 'mounts' = 'single'
     // NET display: 'stacked' (↓ over ↑) or 'inline' (both on one row). Default 'stacked'.
@@ -460,6 +462,7 @@ export class ServerStatsBottomBarComponent implements OnInit, OnDestroy {
         this.customMetrics = conf.customMetrics || [];
         this.cpuStyle = conf.cpuStyle === 'sparkline' ? 'sparkline' : 'bar';
         this.ramStyle = conf.ramStyle === 'text' ? 'text' : 'bar';
+        this.netUnit = conf.netUnit === 'bytes' ? 'bytes' : 'bits';
         this.diskStyle = conf.diskStyle === 'mounts' ? 'mounts' : 'single';
         this.netStyle = conf.netStyle === 'inline' ? 'inline' : 'stacked';
         this.overflowMode = conf.overflowMode === 'wrap' ? 'wrap' : 'scroll';
@@ -476,7 +479,7 @@ export class ServerStatsBottomBarComponent implements OnInit, OnDestroy {
     }
 
     formatSpeed(bytes: number): string {
-        return formatSpeed(bytes);
+        return formatSpeed(bytes, this.netUnit);
     }
 
     formatBytes(bytes: number): string {

@@ -1,6 +1,8 @@
 import {
     parseBaseSample,
     computeDeltaStats,
+    deltaSeconds,
+    buildLinuxNetFragment,
     finalizeSample,
     parseCustom,
     buildCustomMetricsFragment,
@@ -17,6 +19,10 @@ import {
     DeltaSample,
     DiskMount,
 } from '../src/services/stats-parser'
+import { execSync } from 'child_process'
+import * as fs from 'fs'
+import * as os from 'os'
+import * as path from 'path'
 
 const GiB = 1024 ** 3
 const mnt = (mount: string, usagePercent: number, totalBytes = 100 * GiB): DiskMount => ({
@@ -85,7 +91,46 @@ describe('computeDeltaStats', () => {
     })
 })
 
+describe('computeDeltaStats — interval & clock', () => {
+    const prev: DeltaSample = { cpuTotal: 1000, cpuIdle: 900, cpuIowait: 0, rx: 0, tx: 0, t: 0 }
+
+    it('honours a caller-provided max gap (45s polling is not stale with a 135s cap)', () => {
+        const curr: DeltaSample = { cpuTotal: 1100, cpuIdle: 950, cpuIowait: 0, rx: 45_000, tx: 90_000, t: 45_000 }
+        expect(computeDeltaStats(prev, curr)).toEqual({ cpu: 0, iowait: 0, netRx: 0, netTx: 0 }) // default 30s cap
+        expect(computeDeltaStats(prev, curr, 135_000)).toEqual({ cpu: 50, iowait: 0, netRx: 1000, netTx: 2000 })
+    })
+
+    it('prefers the server clock over the jittery client receipt time', () => {
+        const p: DeltaSample = { ...prev, clk: 100.0 }
+        // client saw 1.3s (SSH latency spike), server read counters exactly 1.00s apart
+        const c: DeltaSample = { cpuTotal: 1100, cpuIdle: 950, cpuIowait: 0, rx: 1000, tx: 500, t: 1300, clk: 101.0 }
+        expect(deltaSeconds(p, c)).toBeCloseTo(1.0)
+        expect(computeDeltaStats(p, c)).toMatchObject({ netRx: 1000, netTx: 500 })
+    })
+
+    it('falls back to the client clock when a sample has no server clock', () => {
+        const c: DeltaSample = { cpuTotal: 1100, cpuIdle: 950, cpuIowait: 0, rx: 2000, tx: 0, t: 2000, clk: 50 }
+        expect(deltaSeconds(prev, c)).toBe(2)
+        expect(computeDeltaStats(prev, c).netRx).toBe(1000)
+    })
+
+    it('returns zeros when the server clock went backwards (reboot)', () => {
+        const p: DeltaSample = { ...prev, rx: 10, clk: 5000 }
+        const c: DeltaSample = { ...prev, rx: 999, t: 5000, clk: 3 }
+        expect(computeDeltaStats(p, c)).toEqual({ cpu: 0, iowait: 0, netRx: 0, netTx: 0 })
+    })
+})
+
 describe('finalizeSample', () => {
+    it('delta mode reads the trailing server clock and passes the max gap through', () => {
+        const prev: DeltaSample = { cpuTotal: 1000, cpuIdle: 900, cpuIowait: 0, rx: 0, tx: 0, t: 0, clk: 1000 }
+        const { stats, nextSample } = finalizeSample(
+            { mode: 'D', nums: [1100, 950, 0, 45_000, 0, 50, 1, 2, 60, 1045, 0.5, 1045] }, prev, 46_000, 135_000)
+        expect(nextSample?.clk).toBe(1045)
+        expect(stats.netRx).toBe(1000) // 45000 B over 45s of server time
+        expect(stats.uptime).toBe(1045)
+    })
+
     it('values mode maps fields directly (incl. iowait/memUsed/memTotal) and keeps no sample', () => {
         const { stats, nextSample } = finalizeSample({ mode: 'V', nums: [10, 0, 1, 2, 30, 2000, 6000, 40] }, null, 1000)
         expect(stats).toEqual({ cpu: 10, iowait: 0, netRx: 1, netTx: 2, mem: 30, disk: 40, memUsed: 2000, memTotal: 6000, uptime: 0, load1: 0 })
@@ -156,6 +201,15 @@ describe('formatSpeed', () => {
     it('clamps to top unit', () => {
         expect(formatSpeed(1024 ** 5)).toContain('G/s')
     })
+    it('bits mode: ×8 with SI multiples and Grafana-style labels', () => {
+        expect(formatSpeed(0, 'bits')).toBe('0 b/s')
+        expect(formatSpeed(100, 'bits')).toBe('800 b/s')
+        expect(formatSpeed(125, 'bits')).toBe('1 Kb/s')
+        expect(formatSpeed(125_000_000, 'bits')).toBe('1 Gb/s')
+        // the loki-30 case: 3.44 MB/s on eth0 is shown as 3.3 M/s or 27.5 Mb/s
+        expect(formatSpeed(3_438_000)).toBe('3.3 M/s')
+        expect(formatSpeed(3_438_000, 'bits')).toBe('27.5 Mb/s')
+    })
 })
 
 describe('parseDiskMounts', () => {
@@ -221,6 +275,26 @@ describe('buildDiskMountsFragment', () => {
         expect(f).toContain('df -P -k')    // macOS: KiB ->*1024
         expect(f).not.toContain('df -h')
         expect(f).toContain('/^\\/dev\\//')
+    })
+
+    it('keeps byte counts above 2 GiB exact (busybox awk clamps "%d" to int32)', () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tabby-df-'))
+        try {
+            const dfOut = 'Filesystem 1-blocks Used Available Capacity Mounted on\n' +
+                '/dev/sda1 500107862016 214748364800 285359497216 43% /\n' +
+                'tmpfs 8318976000 0 8318976000 0% /dev/shm\n' +
+                '/dev/sdb1 4000787030016 3600708327014 400078703002 90% /mnt/big data\n'
+            fs.writeFileSync(path.join(dir, 'df.txt'), dfOut)
+            fs.writeFileSync(path.join(dir, 'df'), `#!/bin/sh\ncat "${path.join(dir, 'df.txt')}"\n`, { mode: 0o755 })
+            const cmd = `OS=Linux; PATH="${dir}:$PATH"${buildDiskMountsFragment()}`
+            const out = execSync(`/bin/sh -c '${cmd.replace(/'/g, "'\\''")}'`).toString()
+            expect(parseDiskMounts(out)).toEqual([
+                { mount: '/', usedBytes: 214748364800, totalBytes: 500107862016, availableBytes: 285359497216, usagePercent: 43 },
+                { mount: '/mnt/big data', usedBytes: 3600708327014, totalBytes: 4000787030016, availableBytes: 400078703002, usagePercent: 90 },
+            ])
+        } finally {
+            fs.rmSync(dir, { recursive: true, force: true })
+        }
     })
 })
 
@@ -351,5 +425,51 @@ describe('parseSessionCounts', () => {
     })
     it('returns undefined when the section has no parseable values', () => {
         expect(parseSessionCounts(wrap('sh: who: not found'))).toBeUndefined()
+    })
+})
+
+
+describe('buildLinuxNetFragment (runs the real shell/awk on fixtures)', () => {
+    const header =
+        'Inter-|   Receive                                                |  Transmit\n' +
+        ' face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n'
+    const row = (name: string, rx: number, tx: number, space = true) =>
+        `${name.padStart(6)}:${space ? ' ' : ''}${rx} 1 0 0 0 0 0 0 ${tx} 1 0 0 0 0 0 0\n`
+
+    let dir: string
+    const run = (netDev: string, virtual: string[], uptime = '12345.67 999.00\n') => {
+        dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tabby-net-'))
+        const virtDir = path.join(dir, 'virtual')
+        fs.mkdirSync(virtDir)
+        virtual.forEach(v => fs.mkdirSync(path.join(virtDir, v)))
+        fs.writeFileSync(path.join(dir, 'net_dev'), header + netDev)
+        fs.writeFileSync(path.join(dir, 'uptime'), uptime)
+        const frag = buildLinuxNetFragment({
+            netDev: path.join(dir, 'net_dev'),
+            uptime: path.join(dir, 'uptime'),
+            virtualNetDir: virtDir,
+        })
+        return execSync(`/bin/sh -c '${`${frag}; echo "$net $clk"`.replace(/'/g, "'\\''")}'`).toString().trim()
+    }
+    afterEach(() => fs.rmSync(dir, { recursive: true, force: true }))
+
+    it('sums only physical interfaces (no docker/veth/bond double counting)', () => {
+        const out = run(
+            row('lo', 9999, 9999) + row('eth0', 5000, 7000) + row('eth1', 100, 200) +
+            row('docker0', 3000, 4000) + row('veth1a2b3c4', 4000, 3000) + row('bond0', 5100, 7200),
+            ['lo', 'docker0', 'veth1a2b3c4', 'bond0'])
+        expect(out).toBe('5100 7200 12345.67')
+    })
+
+    it('falls back to all non-lo interfaces when none is physical (container)', () => {
+        expect(run(row('lo', 1, 1) + row('eth0', 300, 400), ['lo', 'eth0'])).toBe('300 400 12345.67')
+    })
+
+    it('handles old kernels without a space after the colon and large counters', () => {
+        expect(run(row('eth0', 123456789012, 98765432101, false), [])).toBe('123456789012 98765432101 12345.67')
+    })
+
+    it('emits zeros when nothing is readable', () => {
+        expect(run('', [], '')).toBe('0 0 0')
     })
 })

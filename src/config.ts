@@ -23,6 +23,8 @@ export class ServerStatsConfigProvider extends ConfigProvider {
                 ramStyle: 'bar',
                 diskStyle: 'single',
                 netStyle: 'stacked',
+                // Network speed unit: 'bits' (Kb/s, Mb/s — SI, like link speeds and Grafana) or 'bytes' (K/s, M/s — binary).
+                netUnit: 'bits',
                 showIoWait: false,
                 // First-class optional metrics (were built-in presets before).
                 showUptime: false,

@@ -12,7 +12,7 @@ A plugin for [Tabby Terminal](https://github.com/Eugeny/tabby) that displays rea
 * **Uptime & Load (optional)**: Time since boot and the 1-minute load average, read along with the base sample (one extra process on the host, whether or not both are shown) and formatted client-side — works on Linux *and* macOS.  
 * **Logged-in users & SSH sessions (optional)**: Distinct users from `who`, and established inbound SSH connections counted on the port this session actually uses (`$SSH_CONNECTION`, falling back to 22), via `ss` where available and `netstat` elsewhere. Their commands are only sent while the toggle is on.  
 * **Never runs out of room**: When the metrics stop fitting, the bottom bar stays one row tall and scrolls — ‹ › buttons plus mouse wheel — or wraps onto more rows if you prefer.  
-* **Lightweight & responsive**: Polls **only the active tab**, computes CPU/network rates client-side from cheap `/proc` counters (no remote `sleep`), and reuses a single self-throttling poll loop — so background SSH tabs cost nothing and the UI stays smooth.  
+* **Lightweight & responsive**: Polls **only the active tab**, computes CPU/network rates client-side from cheap `/proc` counters (no remote `sleep`; network sums physical interfaces only, so Docker/veth/bond traffic is not double-counted, and rates are timed by the server clock), and reuses a single self-throttling poll loop — so background SSH tabs cost nothing and the UI stays smooth.  
 * **Configurable refresh interval**: From 1s (live monitoring) up to 60s, in **Settings → Server Stats**. The request timeout adapts to the interval and slow/erroring servers are backed off automatically.  
 * **Custom Metrics Engine**: Define your own metrics using shell commands (e.g., GPU usage, Temperature, Docker container count).  
   * **Progress Bars**: Visual bars for percentage-based data.  
@@ -29,10 +29,42 @@ A plugin for [Tabby Terminal](https://github.com/Eugeny/tabby) that displays rea
 
 ## **Installation**
 
-1. Open **Tabby Settings**.  
-2. Go to **Plugins**.  
-3. Search for tabby-server-stats.  
-4. Click **Install**.
+The plugin is installed from source: build it locally and symlink the repository into Tabby's plugins directory. Tabby loads `dist/index.js` straight from your working copy.
+
+1. Clone and build:
+
+   ```bash
+   git clone git@github.com:galiullinis/tabby-stats-bar.git
+   cd tabby-stats-bar
+   npm install
+   npm run build
+   ```
+
+2. Symlink the repository into Tabby's plugins directory:
+
+   | OS | Plugins directory |
+   |----|-------------------|
+   | macOS | `~/Library/Application Support/tabby/plugins/node_modules` |
+   | Linux | `~/.config/tabby/plugins/node_modules` |
+   | Windows | `%APPDATA%\tabby\plugins\node_modules` |
+
+   ```bash
+   # macOS example, run from the repository root
+   mkdir -p ~/Library/Application\ Support/tabby/plugins/node_modules
+   ln -s "$(pwd)" ~/Library/Application\ Support/tabby/plugins/node_modules/tabby-stats-bar
+   ```
+
+   On Windows use `mklink /D` (or a junction via `mklink /J`) instead of `ln -s`.
+
+3. Restart Tabby.
+
+**Updating**: pull the changes, run `npm run build` (or keep `npm run watch` running during development) and restart Tabby — no need to reinstall.
+
+**Uninstalling**: remove only the symlink, the repository stays intact:
+
+```bash
+rm ~/Library/Application\ Support/tabby/plugins/node_modules/tabby-stats-bar
+```
 
 ## **Usage**
 
@@ -76,6 +108,7 @@ In **Settings → Server Stats** you can configure:
 * **RAM Display** — Percentage (bar/chart) or numeric Used / Total (`3.2G/8.0G`).
 * **Disk Display** — Root only (`/`) or Mount Points (per-mount, bottom bar; the full list appears on hover after 0.5s).
 * **Network Display** — download/upload on two rows or side by side on one row (bottom bar).
+* **Network Units** — bits/s (`Kb/s`, `Mb/s`, decimal; **default** — matches link speeds and Grafana/node-exporter "bits/sec" panels) or bytes/s (`K/s`, `M/s`, binary).
 * **When Metrics Do Not Fit** — Scroll (one row + ‹ › buttons and mouse wheel) or Wrap (taller bar). Bottom bar only.
 * **Show I/O Wait** — adds a first-class CPU I/O-wait % (Linux, from `/proc/stat`).
 * **Show Uptime / Load Average** — no extra command; read with the base sample.

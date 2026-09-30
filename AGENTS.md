@@ -51,8 +51,10 @@
   хранится в `prevSamples` WeakMap по session). macOS — режим `V` (готовые
   значения, `ps` + `sysctl hw.memsize`). Timeout адаптивный (`adaptiveTimeoutMs`).
 - **Формат вывода** (после маркера START):
-  - `D cpuTotal cpuIdle cpuIowait rx tx mem% memUsedBytes memTotalBytes disk% uptimeSec load1`
+  - `D cpuTotal cpuIdle cpuIowait rx tx mem% memUsedBytes memTotalBytes disk% uptimeSec load1 clk`
   - `V cpu% iowait% rx tx mem% memUsedBytes memTotalBytes disk% uptimeSec load1` (iowait=0 на macOS)
+  - `rx/tx` в `D` — только **физические** интерфейсы (`buildLinuxNetFragment`); `clk` —
+    серверный `/proc/uptime` (сек, 10 мс), читается тем же awk, что и счётчики сети.
   Парсер — `parseBaseSample`; маппинг полей — `finalizeSample`. CPU% и iowait%
   считаются client-side по дельте `/proc/stat` (`computeDeltaStats`). Новые поля
   добавляются **только в конец** — деструктуризация с дефолтами держит обратную
@@ -105,6 +107,18 @@
   .stat-section { border-left }`) вместо явных `<div class="stat-separator">`.
   Причина: с опциональными секциями явные разделители требуют логики «есть ли
   сосед»; CSS-селектор соседа решает это бесплатно.
+- **[NETIO, Stage 3.6] Порог «устаревшего» сэмпла зависит от интервала** —
+  `maxDeltaGapMs = max(30s, interval×3)` ([poll-timing.ts](src/services/poll-timing.ts)).
+  Причина: фиксированные 30s при интервале 31–60s обнуляли CPU/IOW/сеть навсегда.
+- **[NETIO, Stage 3.6] Сеть — только физические интерфейсы**: исключаются
+  `/sys/devices/virtual/net/*` (lo, docker, veth, bridge, bond, vlan, tun/wg); если
+  физических нет (контейнер) — все, кроме `lo`. Причина: один трафик проходил через
+  veth→docker0→eth0 / bond+slaves и считался 2–3 раза.
+- **[NETIO, Stage 3.6] `dt` для скоростей — по серверным часам** (`clk`), fallback на
+  клиентское время. Причина: SSH RTT-джиттер искажал скорость на ±20–30% при 1s.
+- **[Shell, Stage 3.6] Байтовые значения в awk — только `printf "%.0f"`, не `%d`.**
+  Причина: busybox awk (Alpine) обрезает `%d` до int32 → RAM и mount'ы >2 GiB
+  показывались как 2147483647. `%d` допустим только для заведомо малых чисел (%, uptime).
 - **[Arch, Stage 3] Убраны `window.serverStatsFloating/BottomBar` и `forceUpdate`.**
   Рефреш на toolbar-toggle идёт через `config.changed$` (оба компонента подписаны;
   floating теперь делает `checkAndFetch` сразу).
@@ -128,6 +142,9 @@
   компонентов рискованна без возможности прогнать реальное приложение Tabby.
 - **Дублирование логики опроса** между двумя компонентами (частично смягчено
   вынесением чистой логики в сервисы).
+- **Сеть на Linux (остаточное):** суммарный счётчик по всем физическим интерфейсам —
+  при исчезновении интерфейса один сэмпл даёт заниженную скорость/0; трафик между
+  VM/контейнерами внутри хоста (без выхода на физический NIC) не учитывается.
 - **Delta «прогрев»:** первый опрос новой сессии в режиме D даёт cpu/net=0 (нет
   предыдущего сэмпла); реальные значения со второго. Смягчено initial-fetch на attach.
 
@@ -142,7 +159,7 @@
 npm install            # установка зависимостей (нужно для build и test)
 npm run build          # webpack production build -> dist/
 npm run watch          # webpack watch
-npm test               # jest (104 юнит-теста чистой логики)
+npm test               # jest (117 тестов; сетевой/дисковый awk гоняется на фикстурах)
 npm run typecheck      # tsc --noEmit (быстрый typecheck без сборки)
 ```
 Линтера в проекте нет.
@@ -306,3 +323,38 @@ npm run typecheck      # tsc --noEmit (быстрый typecheck без сбор�
   - Верификация: `npm test` ✓ (104), `npx webpack` ✓ (exit 0), `npx tsc --noEmit` ✓;
     собранная команда прогнана на реальном macOS, Linux-ветка — на синтетическом
     `/proc` и синтетическом выводе `ss` (обе раскладки колонок) / `netstat`.
+- **Stage 3.6 (готово) — корректность NETIO:**
+  - Исправлено: при `pollInterval` 31–60s CPU/IOW/сеть всегда были 0 (фиксированный
+    порог 30s в `computeDeltaStats`). Теперь порог передаётся параметром —
+    `maxDeltaGapMs(interval)`.
+  - Сбор сети вынесен в `buildLinuxNetFragment` ([stats-parser.ts](src/services/stats-parser.ts)):
+    только физические интерфейсы (fallback — все, кроме `lo`), имя отделяется по `:`
+    (старые ядра без пробела), суммы через `%.0f` (mawk не уходит в exponent).
+  - Протокол `D` расширен полем `clk` (последнее); `deltaSeconds` предпочитает его
+    клиентскому `Date.now()`; откат `clk` (reboot) → нули.
+  - Тесты: +11 (maxDeltaGapMs, clock/gap, реальный sh/awk на фикстурах /proc/net/dev)
+    → **115**. Полная команда проверена в Docker (Alpine/busybox awk, Debian/mawk),
+    сетевой фрагмент — на BSD awk (macOS). Верификация: `npm test` ✓ (115),
+    `npx webpack` ✓, `npm run typecheck` ✓.
+- **Stage 3.7 (готово) — переполнение int32 в busybox awk:**
+  - `printf "%d"` → `"%.0f"` для байтов: `memUsedBytes/memTotalBytes` (Linux `/proc/meminfo`,
+    macOS `memused`) и used/total/avail в `buildDiskMountsFragment` (Linux и macOS).
+    На Alpine RAM и mount'ы >2 GiB выводились как 2147483647.
+  - Тест: +1 (фрагмент диска с подменённым `df`, значения до 4 ТБ) → **116**.
+    Проверено в Docker: Alpine (busybox awk) и Debian (mawk). Верификация:
+    `npm test` ✓ (116), `npx webpack` ✓, `npm run typecheck` ✓.
+- **Stage 3.8 (готово) — единицы скорости сети + обновление зависимостей:**
+  - `serverStats.netUnit` = `'bits'` (**дефолт**, ×8, основание 1000, подписи как в
+    Grafana «bits/sec»: `Kb/s`/`Mb/s`/`Gb/s`) | `'bytes'` (`K/s`/`M/s`, основание 1024 —
+    как было до 3.8). **Меняет вид по умолчанию** для существующих пользователей (числа
+    станут ~×8 больше, с другими подписями); вернуть — переключателем. `formatSpeed(bytes, unit)` в
+    [stats-parser.ts](src/services/stats-parser.ts); применяется в bottom-bar и floating,
+    переключатель «Network Units» в настройках. Повод: сверка на проде показала, что
+    плагин и node-exporter дают одно и то же, но панель Grafana — в мегабитах
+    (3.44 МБ/с = 27.5 Мбит/с), что выглядело как расхождение в 8 раз.
+  - Зависимости: `npm update` + `npm audit fix` без мажоров (webpack 5.111, tabby-*
+    1.0.231, sass, ts-jest, ts-loader, транзитивные) — 19 → 3 уязвимостей; оставшиеся —
+    Angular 14 (external, в рантайме Angular хоста Tabby; фикс требует Angular 20+).
+    Меняется только `package-lock.json`. **Отложено:** Angular 14→15 (актуальный
+    `tabby-core` требует `^15`), мажоры webpack-cli/css-loader/sass-loader/jest.
+  - Тесты: +1 → **117**. Верификация: `npm test` ✓ (117), `npx webpack` ✓, `npm run typecheck` ✓.

@@ -63,14 +63,16 @@ export interface DeltaSample {
     cpuIowait: number
     rx: number
     tx: number
-    t: number
+    t: number     // client wall-clock at receipt (ms) — fallback clock
+    clk?: number  // server /proc/uptime (s, 10ms resolution) read with the net counters
 }
 
 const BASE_RE = new RegExp(`${MARKERS.start}\\s+([DV])((?:\\s+-?[\\d.]+)+)`)
 
-// If two consecutive samples are further apart than this, treat the new one as a
-// fresh start (the counters / wall-clock gap would otherwise smear the rate).
-const MAX_DELTA_GAP_MS = 30_000
+// Default for the stale-sample threshold: if two consecutive samples are further
+// apart than this, treat the new one as a fresh start. Callers should pass a
+// value derived from the poll interval (see maxDeltaGapMs in poll-timing.ts).
+export const DEFAULT_MAX_DELTA_GAP_MS = 30_000
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v))
 
@@ -88,19 +90,34 @@ export function parseBaseSample(output: string): RawSample | null {
 }
 
 /**
+ * Interval between two samples in seconds. Prefers the server clock (`clk`, read
+ * in the same awk as the net counters), because the client receipt time includes
+ * SSH round-trip jitter — at 1s polling that alone skews the rate by ±20–30%.
+ * Falls back to the client clock when a sample has no server clock. Returns 0
+ * when the server clock went backwards (reboot → counters reset too). Pure.
+ */
+export function deltaSeconds(prev: DeltaSample, curr: DeltaSample): number {
+    if (prev.clk && curr.clk) {
+        return Math.max(0, curr.clk - prev.clk)
+    }
+    return (curr.t - prev.t) / 1000
+}
+
+/**
  * Compute instantaneous CPU%, I/O-wait% and network byte/s rates from two delta
  * samples. Returns zeros for the first sample, a non-positive interval, a stale
- * gap, or a counter reset (curr < prev). Pure.
+ * gap (> maxGapMs), or a counter reset (curr < prev). Pure.
  */
 export function computeDeltaStats(
     prev: DeltaSample | null | undefined,
-    curr: DeltaSample
+    curr: DeltaSample,
+    maxGapMs: number = DEFAULT_MAX_DELTA_GAP_MS
 ): { cpu: number; iowait: number; netRx: number; netTx: number } {
     if (!prev) {
         return { cpu: 0, iowait: 0, netRx: 0, netTx: 0 }
     }
-    const dtSec = (curr.t - prev.t) / 1000
-    if (dtSec <= 0 || dtSec > MAX_DELTA_GAP_MS / 1000) {
+    const dtSec = deltaSeconds(prev, curr)
+    if (dtSec <= 0 || dtSec > maxGapMs / 1000) {
         return { cpu: 0, iowait: 0, netRx: 0, netTx: 0 }
     }
     const totalD = curr.cpuTotal - prev.cpuTotal
@@ -121,7 +138,8 @@ export function computeDeltaStats(
 export function finalizeSample(
     sample: RawSample,
     prev: DeltaSample | null | undefined,
-    now: number
+    now: number,
+    maxGapMs: number = DEFAULT_MAX_DELTA_GAP_MS
 ): { stats: FinalStats; nextSample: DeltaSample | null } {
     if (sample.mode === 'V') {
         // nums = [cpu, iowait, rx, tx, mem, memUsed, memTotal, disk, uptime, load1]
@@ -131,10 +149,13 @@ export function finalizeSample(
             nextSample: null,
         }
     }
-    // Delta mode: nums = [cpuTotal, cpuIdle, cpuIowait, rx, tx, mem, memUsed, memTotal, disk, uptime, load1]
-    const [cpuTotal = 0, cpuIdle = 0, cpuIowait = 0, rx = 0, tx = 0, mem = 0, memUsed = 0, memTotal = 0, disk = 0, uptime = 0, load1 = 0] = sample.nums
+    // Delta mode: nums = [cpuTotal, cpuIdle, cpuIowait, rx, tx, mem, memUsed, memTotal, disk, uptime, load1, clk]
+    const [cpuTotal = 0, cpuIdle = 0, cpuIowait = 0, rx = 0, tx = 0, mem = 0, memUsed = 0, memTotal = 0, disk = 0, uptime = 0, load1 = 0, clk = 0] = sample.nums
     const curr: DeltaSample = { cpuTotal, cpuIdle, cpuIowait, rx, tx, t: now }
-    const d = computeDeltaStats(prev, curr)
+    if (clk > 0) {
+        curr.clk = clk
+    }
+    const d = computeDeltaStats(prev, curr, maxGapMs)
     return {
         stats: { cpu: d.cpu, iowait: d.iowait, netRx: d.netRx, netTx: d.netTx, mem, disk, memUsed, memTotal, uptime, load1 },
         nextSample: curr,
@@ -155,6 +176,39 @@ export function parseCustom(
         id: m.id,
         value: customValues[index] || '-',
     }))
+}
+
+export interface NetCounterPaths {
+    netDev: string
+    uptime: string
+    virtualNetDir: string
+}
+
+const LINUX_NET_PATHS: NetCounterPaths = {
+    netDev: '/proc/net/dev',
+    uptime: '/proc/uptime',
+    virtualNetDir: '/sys/devices/virtual/net',
+}
+
+/**
+ * Linux shell fragment that sets `$net` ("rxBytes txBytes") and `$clk` (server
+ * uptime, seconds with 10ms resolution, read in the same awk as the counters).
+ *
+ * Only PHYSICAL interfaces are summed: everything under /sys/devices/virtual/net
+ * (lo, docker0, veth*, br-*, bond*, vlan, tun/tap, wg…) is skipped, because the
+ * same bytes pass through several of those (veth → docker0 → eth0, bond0 + its
+ * slaves, a tunnel + its carrier), and summing all of them counted traffic 2–3×.
+ * If no physical interface is visible (e.g. inside a container, where eth0 is
+ * itself a veth), every non-`lo` interface is summed instead.
+ *
+ * The interface name is split off at the first ':' (older kernels print no space
+ * after it), and sums use printf "%.0f" so mawk never prints byte counters in
+ * exponent form. The virtual list is built with shell builtins only (no extra
+ * processes). Paths are parameters so tests can run it against fixture files.
+ */
+export function buildLinuxNetFragment(paths: NetCounterPaths = LINUX_NET_PATHS): string {
+    const awkProg = `FILENAME == up { clk=$1; next } FNR > 2 { i=index($0, ":"); if (!i) next; name=substr($0, 1, i-1); gsub(/[ \\t]/, "", name); if (name == "lo") next; split(substr($0, i+1), f, " "); arx+=f[1]; atx+=f[9]; if (index(virt, " " name " ") == 0) { n++; prx+=f[1]; ptx+=f[9] } } END { if (n > 0) { rx=prx; tx=ptx } else { rx=arx; tx=atx } printf "%.0f %.0f %s", rx, tx, (clk == "" ? "0" : clk) }`
+    return `virt=" "; for d in ${paths.virtualNetDir}/*; do [ -e "$d" ] && virt="$virt\${d##*/} "; done; set -- $(awk -v virt="$virt" -v up="${paths.uptime}" '${awkProg}' ${paths.uptime} ${paths.netDev} 2>/dev/null); net="\${1:-0} \${2:-0}"; clk=\${3:-0}`
 }
 
 /**
@@ -181,11 +235,13 @@ export function buildCustomMetricsFragment(customMetrics: CustomMetric[]): strin
  * - Filters to real local block devices (`Filesystem` starts with `/dev/`),
  *   which excludes virtual/pseudo filesystems (tmpfs, overlay, proc, …) and
  *   network mounts (nfs `host:/…`, cifs `//host/…`).
+ * - Byte columns use printf "%.0f", never "%d": busybox awk clamps "%d" to
+ *   int32, so every mount above 2 GiB came out as 2147483647.
  * Relies on `$OS` being set earlier in the same shell (see baseStatsCommand).
  */
 export function buildDiskMountsFragment(): string {
-    const linux = `df -P -B1 2>/dev/null | awk 'NR>1 && $1 ~ /^\\/dev\\// { m=$6; for (i=7;i<=NF;i++) m=m" "$i; printf "%d %d %d %d %s\\n", $3, $2, $4, $5+0, m }'`
-    const mac = `df -P -k 2>/dev/null | awk 'NR>1 && $1 ~ /^\\/dev\\// { m=$6; for (i=7;i<=NF;i++) m=m" "$i; printf "%d %d %d %d %s\\n", $3*1024, $2*1024, $4*1024, $5+0, m }'`
+    const linux = `df -P -B1 2>/dev/null | awk 'NR>1 && $1 ~ /^\\/dev\\// { m=$6; for (i=7;i<=NF;i++) m=m" "$i; printf "%.0f %.0f %.0f %d %s\\n", $3, $2, $4, $5+0, m }'`
+    const mac = `df -P -k 2>/dev/null | awk 'NR>1 && $1 ~ /^\\/dev\\// { m=$6; for (i=7;i<=NF;i++) m=m" "$i; printf "%.0f %.0f %.0f %d %s\\n", $3*1024, $2*1024, $4*1024, $5+0, m }'`
     return `; echo "${MARKERS.diskStart}"; if [ "$OS" = "Darwin" ]; then ${mac}; else ${linux}; fi; echo "${MARKERS.diskEnd}"`
 }
 
@@ -319,21 +375,32 @@ export function formatLoad(load: number | undefined): string {
     return load.toFixed(2)
 }
 
-/** Format a bytes/second value into a short human string. */
-export function formatSpeed(bytes: number): string {
+export type NetUnit = 'bytes' | 'bits'
+
+/**
+ * Format a bytes/second value into a short human string.
+ *
+ * - `bytes` (default): binary multiples, `K/s` / `M/s` = KiB/s / MiB/s.
+ * - `bits`: value ×8 with decimal (SI) multiples, labelled like Grafana's
+ *   "bits/sec" unit (`Kb/s` / `Mb/s` / `Gb/s`) — the convention for link speeds,
+ *   so the number matches node-exporter dashboards and NIC ratings.
+ */
+export function formatSpeed(bytes: number, unit: NetUnit = 'bytes'): string {
+    const bits = unit === 'bits'
     if (!bytes || bytes <= 0) {
-        return '0 B/s'
+        return bits ? '0 b/s' : '0 B/s'
     }
-    const k = 1024
-    const sizes = ['B/s', 'K/s', 'M/s', 'G/s']
-    let i = Math.floor(Math.log(bytes) / Math.log(k))
+    const value = bits ? bytes * 8 : bytes
+    const k = bits ? 1000 : 1024
+    const sizes = bits ? ['b/s', 'Kb/s', 'Mb/s', 'Gb/s'] : ['B/s', 'K/s', 'M/s', 'G/s']
+    let i = Math.floor(Math.log(value) / Math.log(k))
     if (i < 0) {
         i = 0
     }
     if (i >= sizes.length) {
         i = sizes.length - 1
     }
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i]
+    return parseFloat((value / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i]
 }
 
 /**
